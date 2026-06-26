@@ -25,28 +25,39 @@ def fetch_bias_numbers(loto_type):
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
             
-            # アンカー(top8 / top7)を基準にターゲット要素を特定
-            anchor_id = "top7" if loto_type == "ミニロト" else "top8"
-            target = soup.find(id=anchor_id) or soup.find(attrs={"name": anchor_id})
+            # 1. 「絞り込み予想」という文字列が含まれるタグ（見出し等）を特定
+            target_element = None
+            for tag in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'div', 'p', 'td', 'th', 'span']):
+                if '絞り込み予想' in tag.get_text():
+                    target_element = tag
+                    break
             
-            # 周辺のテキストやテーブルから数字（1〜2桁）を抽出
-            search_area = target.find_parent() if target else soup
-            text_content = search_area.get_text()
-            
-            # 正規表現で数字を抽出
-            all_numbers = [int(n) for n in re.findall(r'\d+', text_content)]
-            
-            # 各ロトの上限数値でフィルタリング
-            max_num = 37 if loto_type == "ロト7" else (43 if loto_type == "ロト6" else 31)
-            valid_numbers = sorted(list(set([n for n in all_numbers if 1 <= n <= max_num])))
-            
-            # 十分な候補数字が取れた場合はそれを返す
-            if len(valid_numbers) >= 10:
-                return valid_numbers, False
+            if target_element:
+                # 2. 「絞り込み予想」より後ろにあるテキストのみをすべて結合
+                next_text = ""
+                for sibling in target_element.find_all_next(string=True):
+                    next_text += sibling + " "
+                
+                # 3. スペースや改行で区切られた「2桁の数字の連続（4個以上）」を正規表現でピンポイント抽出
+                # これにより回号（1393など）や、上部にある削除数字の混入を防ぎます
+                match = re.search(r'(?:\d{1,2}[\s\xa0\n\r]+){4,}\d{1,2}', next_text)
+                
+                if match:
+                    numbers_str = match.group(0)
+                    # マッチした塊から数字だけをリストとして抽出
+                    all_numbers = [int(n) for n in re.findall(r'\d+', numbers_str)]
+                    
+                    # 各ロトの上限数値でフィルタリング
+                    max_num = 37 if loto_type == "ロト7" else (43 if loto_type == "ロト6" else 31)
+                    valid_numbers = sorted(list(set([n for n in all_numbers if 1 <= n <= max_num])))
+                    
+                    # 最低限必要な個数（ミニロトなら5個以上）が取れていれば採用
+                    if len(valid_numbers) >= 5:
+                        return valid_numbers, False
     except Exception as e:
         pass
 
-    # サイトから取得できない場合のバックアップ（直近の頻出傾向ベースのモックデータ）
+    # サイトから取得できない場合のバックアップ
     fallback_data = {
         "ロト7": [1, 5, 9, 12, 14, 19, 23, 26, 30, 32, 35, 37],
         "ロト6": [2, 6, 11, 15, 18, 22, 27, 31, 35, 38, 41, 43],
@@ -64,7 +75,6 @@ def generate_prediction(bias_numbers, loto_type, trend, count=1):
     }
     rule = loto_rules[loto_type]
     
-    # 候補数字が足りない場合は全体から補完
     if len(bias_numbers) < rule["pick"]:
         bias_numbers = list(set(bias_numbers) | set(range(1, rule["max"] + 1)))
 
@@ -74,7 +84,6 @@ def generate_prediction(bias_numbers, loto_type, trend, count=1):
         weights = []
         for num in bias_numbers:
             weight = 1.0
-            # 直近の傾向による重み付け（バイアス調整）
             if trend == "奇数重視" and num % 2 != 0:
                 weight += 0.6
             elif trend == "偶数重視" and num % 2 == 0:
@@ -85,7 +94,6 @@ def generate_prediction(bias_numbers, loto_type, trend, count=1):
                 weight += 0.5
             weights.append(weight)
         
-        # 重み付きで重複なしランダム抽出
         pool = list(bias_numbers)
         w_pool = list(weights)
         selected = []
@@ -137,8 +145,7 @@ if st.button(f"🔮 {loto_choice} の予想を展開する", type="primary"):
     st.subheader("🎯 予想組み合わせ結果")
     
     for i, res in enumerate(results, 1):
-        # 数字を綺麗に並べて表示
         balls = "  ".join([f"`{num:02d}`" for num in res])
         st.markdown(f"**パターン {i:02d}** : {balls}")
-        
-    st.balloons()
+    
+    # 風船エフェクト（st.balloons()）は削除しました
