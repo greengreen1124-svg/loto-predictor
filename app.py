@@ -11,49 +11,49 @@ st.set_page_config(page_title="ロト数字選択 AI予想", page_icon="🎰", l
 @st.cache_data(ttl=3600)  # 1時間キャッシュしてサイトへの負荷を軽減
 def fetch_bias_numbers(loto_type):
     urls = {
-        "ロト7": "http://sougaku.com/loto7/index.html#top8",
-        "ロト6": "http://sougaku.com/loto6/index.html#top8",
-        "ミニロト": "http://sougaku.com/miniloto/index.html#top7"
+        "ロト7": "http://sougaku.com/loto7/index.html",
+        "ロト6": "http://sougaku.com/loto6/index.html",
+        "ミニロト": "http://sougaku.com/miniloto/index.html"
     }
     url = urls[loto_type]
     
     try:
         response = requests.get(url, timeout=10)
-        # 文字化け対策
         response.encoding = response.apparent_encoding
         
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
             
-            # 1. 「絞り込み予想」という文字列が含まれるタグ（見出し等）を特定
+            # 1. リンク（aタグ）を除外し、本文内の「絞り込み予想」というテキストを持つ要素を特定
             target_element = None
-            for tag in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'div', 'p', 'td', 'th', 'span']):
+            for tag in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'div', 'p', 'th', 'td']):
+                if tag.name == 'a' or tag.find('a'):
+                    continue  # メニュー用のリンクはスキップ
                 if '絞り込み予想' in tag.get_text():
                     target_element = tag
                     break
             
             if target_element:
-                # 2. 「絞り込み予想」より後ろにあるテキストのみをすべて結合
-                next_text = ""
-                for sibling in target_element.find_all_next(string=True):
-                    next_text += sibling + " "
-                
-                # 3. スペースや改行で区切られた「2桁の数字の連続（4個以上）」を正規表現でピンポイント抽出
-                # これにより回号（1393など）や、上部にある削除数字の混入を防ぎます
-                match = re.search(r'(?:\d{1,2}[\s\xa0\n\r]+){4,}\d{1,2}', next_text)
-                
-                if match:
-                    numbers_str = match.group(0)
-                    # マッチした塊から数字だけをリストとして抽出
-                    all_numbers = [int(n) for n in re.findall(r'\d+', numbers_str)]
+                # 2. 見出しの「後ろにある要素」を1つずつ順番に精査（ページ全体の結合はしない）
+                for next_node in target_element.find_all_next(['p', 'div', 'td', 'tr']):
+                    node_text = next_node.get_text(strip=True)
                     
-                    # 各ロトの上限数値でフィルタリング
-                    max_num = 37 if loto_type == "ロト7" else (43 if loto_type == "ロト6" else 31)
-                    valid_numbers = sorted(list(set([n for n in all_numbers if 1 <= n <= max_num])))
+                    # 1桁または2桁の数字の塊を抽出
+                    numbers = re.findall(r'\b\d{1,2}\b', node_text)
                     
-                    # 最低限必要な個数（ミニロトなら5個以上）が取れていれば採用
-                    if len(valid_numbers) >= 5:
-                        return valid_numbers, False
+                    # 各ロトのルール設定
+                    min_required = 5 if loto_type == "ミニロト" else (6 if loto_type == "ロト6" else 7)
+                    max_num = 31 if loto_type == "ミニロト" else (43 if loto_type == "ロト6" else 37)
+                    
+                    # 有効な数字のみをフィルタリング
+                    valid_nums_in_node = [int(n) for n in numbers if 1 <= int(n) <= max_num]
+                    unique_nums = sorted(list(set(valid_nums_in_node)))
+                    
+                    # 【重要】数字が最低必要数以上あり、かつ「全数字」が揃ってしまっていないかチェック
+                    # これにより、すべての数字が並んだデータテーブル（誤検知）を綺麗に弾きます
+                    if min_required <= len(unique_nums) < max_num:
+                        return unique_nums, False
+                        
     except Exception as e:
         pass
 
@@ -147,5 +147,3 @@ if st.button(f"🔮 {loto_choice} の予想を展開する", type="primary"):
     for i, res in enumerate(results, 1):
         balls = "  ".join([f"`{num:02d}`" for num in res])
         st.markdown(f"**パターン {i:02d}** : {balls}")
-    
-    # 風船エフェクト（st.balloons()）は削除しました
