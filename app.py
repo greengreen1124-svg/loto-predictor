@@ -10,22 +10,31 @@ import os
 # ページの設定
 st.set_page_config(page_title="ロトデータ分析＆AI予想", page_icon="🎰", layout="wide")
 
-# --- スクレイピング関数（ビアス式数字の取得） ---
-@st.cache_data(ttl=3600)
-def fetch_bias_numbers(loto_type):
+# --- スクレイピング関数（通信成功時のみ数字を返す） ---
+def fetch_bias_numbers_strict(loto_type):
     urls = {
         "ロト7": "http://sougaku.com/loto7/index.html",
         "ロト6": "http://sougaku.com/loto6/index.html",
         "ミニロト": "http://sougaku.com/miniloto/index.html"
     }
     url = urls[loto_type]
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    
+    status_log = {"status_code": None, "numbers_found": 0, "msg": "未接続", "success": False}
+    
     try:
-        response = requests.get(url, timeout=10)
+        response = requests.get(url, headers=headers, timeout=10)
+        status_log["status_code"] = response.status_code
         response.encoding = response.apparent_encoding
+        
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
             target_element = None
-            for tag in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'div', 'p', 'th', 'td']):
+            
+            for tag in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'div', 'p', 'th', 'td', 'b']):
                 if tag.name == 'a' or tag.find('a'):
                     continue
                 if '絞り込み予想' in tag.get_text():
@@ -33,26 +42,33 @@ def fetch_bias_numbers(loto_type):
                     break
             
             if target_element:
-                for next_node in target_element.find_all_next(['p', 'div', 'td', 'tr']):
+                for next_node in target_element.find_all_next(['p', 'div', 'td', 'tr', 'span']):
                     node_text = next_node.get_text(strip=True)
                     numbers = re.findall(r'\b\d{1,2}\b', node_text)
+                    
                     min_required = 5 if loto_type == "ミニロト" else (6 if loto_type == "ロト6" else 7)
                     max_num = 31 if loto_type == "ミニロト" else (43 if loto_type == "ロト6" else 37)
                     
-                    valid_nums_in_node = [int(n) for n in numbers if 1 <= int(n) <= max_num]
-                    unique_nums = sorted(list(set(valid_nums_in_node)))
+                    valid_nums = [int(n) for n in numbers if 1 <= int(n) <= max_num]
+                    unique_nums = sorted(list(set(valid_nums)))
                     
                     if min_required <= len(unique_nums) < max_num:
-                        return unique_nums, False
-    except:
-        pass
+                        status_log["numbers_found"] = len(unique_nums)
+                        status_log["msg"] = "URLからのリアルタイム取得に成功しました。"
+                        status_log["success"] = True
+                        return unique_nums, status_log
+                
+                status_log["msg"] = "「絞り込み予想」の文字は見つかりましたが、有効な数字の組が検出できませんでした（構造変更の可能性）。"
+            else:
+                status_log["msg"] = "ページ内に「絞り込み予想」というキーワードが見つかりませんでした。"
+        else:
+            status_log["msg"] = f"サイトへのアクセスが拒否されました（HTTP {response.status_code}）。"
+            
+    except Exception as e:
+        status_log["msg"] = f"通信エラーが発生しました: {str(e)}"
 
-    fallback_data = {
-        "ロト7": [1, 5, 9, 12, 14, 19, 23, 26, 30, 32, 35, 37],
-        "ロト6": [2, 6, 11, 15, 18, 22, 27, 31, 35, 38, 41, 43],
-        "ミニロト": [3, 7, 11, 14, 19, 22, 25, 28, 31]
-    }
-    return fallback_data[loto_type], True
+    # 取得失敗時はバックアップを返さず None を返す
+    return None, status_log
 
 
 # --- CSVデータの読み込みと「直近30回」の高度な傾向分析 ---
@@ -67,7 +83,6 @@ def load_and_analyze_history(loto_type):
     if not os.path.exists(filename):
         return None, None, f"ファイル `{filename}` が見つかりません。GitHubリポジトリにCSVを配置してください。"
     
-    # 文字コード対応
     for enc in ['utf-8', 'cp932', 'shift_jis']:
         try:
             df = pd.read_csv(filename, encoding=enc)
@@ -77,7 +92,6 @@ def load_and_analyze_history(loto_type):
     else:
         return None, None, "CSVファイルの読み込みに失敗しました。"
     
-    # 提供されたCSVの列名（第X数字）に完全準拠
     if loto_type == "ロト7":
         main_cols = [f"第{i}数字" for i in range(1, 8)]
     elif loto_type == "ロト6":
@@ -88,27 +102,22 @@ def load_and_analyze_history(loto_type):
     if not all(col in df.columns for col in main_cols):
         return None, None, f"CSV内にターゲット列名が見つかりません。列名が「第1数字」等になっているか確認してください。"
         
-    # 全データの本数字を数値リスト化して格納（float対策としてint(float())で安全に変換）
     def clean_row(row):
         return sorted([int(float(i)) for i in row if pd.notna(i) and str(i).strip() != ''])
         
     df['numbers_list'] = df[main_cols].values.tolist()
     df['numbers_list'] = df['numbers_list'].apply(clean_row)
     
-    # 傾向の一括計算
     df['sum_val'] = df['numbers_list'].apply(sum)
     df['odds_count'] = df['numbers_list'].apply(lambda x: len([i for i in x if i % 2 != 0]))
     df['has_serial'] = df['numbers_list'].apply(lambda x: any(x[i+1] - x[i] == 1 for i in range(len(x)-1)))
     
-    # 「1つ前の回」の数字をシフト（下に行くほど新しい昇順データなので、shift(1)が1つ前の過去回になる）
     df['prev_numbers'] = df['numbers_list'].shift(1)
     
-    # ひっぱり計算
     def calc_back(row):
         if not isinstance(row['prev_numbers'], list): return 0
         return len(set(row['numbers_list']) & set(row['prev_numbers']))
         
-    # スライド計算（前回の±1、ただしひっぱりは除く）
     def calc_slide(row):
         if not isinstance(row['prev_numbers'], list): return 0
         prev_set = set(row['prev_numbers'])
@@ -123,9 +132,7 @@ def load_and_analyze_history(loto_type):
     df['back_count'] = df.apply(calc_back, axis=1)
     df['slide_count'] = df.apply(calc_slide, axis=1)
     
-    # 末尾の30行（＝最新の直近30回）を抽出して統計を取る
     recent_30 = df.tail(30)
-    
     set_counts = recent_30['セット'].value_counts().to_dict() if 'セット' in df.columns else {"未設定": 1}
     
     analysis = {
@@ -139,9 +146,7 @@ def load_and_analyze_history(loto_type):
         "set_ball_counts": set_counts
     }
     
-    # 完全に一番最後の行＝最新の（前回）出目
     last_drawn = df['numbers_list'].iloc[-1]
-    
     return analysis, last_drawn, None
 
 
@@ -154,9 +159,6 @@ def generate_advanced_prediction(bias_numbers, loto_type, trend_analysis, last_n
     }
     rule = loto_rules[loto_type]
     
-    if len(bias_numbers) < rule["pick"]:
-        bias_numbers = list(set(bias_numbers) | set(range(1, rule["max"] + 1)))
-        
     last_set = set(last_numbers)
     last_slides = set()
     for x in last_set:
@@ -167,34 +169,28 @@ def generate_advanced_prediction(bias_numbers, loto_type, trend_analysis, last_n
     valid_combinations = []
     attempts = 0
     
-    # シミュレーションによる絞り込み（ふるい落とし）
     while len(valid_combinations) < count and attempts < 30000:
         attempts += 1
         sample = sorted(random.sample(bias_numbers, rule["pick"]))
         
-        # 1. 【バグ修正済み】合計数フィルター
         s_val = sum(sample)
         if not (trend_analysis["sum_min"] <= s_val <= trend_analysis["sum_max"]):
             continue
                 
-        # 2. 奇数偶数比フィルター (最頻値から±1個まで許容)
         o_val = len([x for x in sample if x % 2 != 0])
         if abs(o_val - trend_analysis["odds_mode"]) > 1:
             continue
             
-        # 3. 連番発生確率フィルター
         has_s = any(sample[j+1] - sample[j] == 1 for j in range(len(sample)-1))
         if trend_analysis["serial_rate"] > 0.5 and not has_s and random.random() > 0.3:
             continue
         elif trend_analysis["serial_rate"] <= 0.5 and has_s and random.random() > 0.4:
             continue
             
-        # 4. ひっぱり数フィルター (直近平均から±1.5個以内)
         b_val = len(set(sample) & last_set)
         if abs(b_val - trend_analysis["back_avg"]) > 1.5:
             continue
             
-        # 5. スライド数フィルター (直近平均から±1.5個以内)
         sl_val = len(set(sample) & last_slides)
         if abs(sl_val - trend_analysis["slide_avg"]) > 1.5:
             continue
@@ -202,7 +198,6 @@ def generate_advanced_prediction(bias_numbers, loto_type, trend_analysis, last_n
         if sample not in valid_combinations:
             valid_combinations.append(sample)
             
-    # 条件が厳しすぎて万が一目標数に達さなかった場合のセーフティ
     if len(valid_combinations) < count:
         for _ in range(count - len(valid_combinations)):
             valid_combinations.append(sorted(random.sample(bias_numbers, rule["pick"])))
@@ -210,7 +205,6 @@ def generate_advanced_prediction(bias_numbers, loto_type, trend_analysis, last_n
     return valid_combinations
 
 
-# --- セット球予測 ---
 def predict_next_set_ball(set_counts):
     if not set_counts or "未設定" in set_counts:
         return "データなし", "ー"
@@ -222,7 +216,6 @@ def predict_next_set_ball(set_counts):
 
 # --- Streamlit UI 構築 ---
 st.title("🎰 ロト・スマートAI予想システム（過去トレンド完全連動型）")
-st.write("創楽の「ビアス式絞り込み数字」に対し、アップロードされたCSVの最新30回分から弾き出した5大傾向データを掛け合わせて厳選予想します。")
 
 # サイドバー
 st.sidebar.header("⚙️ 条件設定")
@@ -258,35 +251,38 @@ else:
         if hot_set != "データなし":
             st.metric(label="🔥 本命トレンド球（直近30回で最も使われている）", value=f"{hot_set} セット")
             st.metric(label="❄️ 大穴デジタル球（直近30回で出現が最も滞っている）", value=f"{cold_set} セット")
-            with st.expander("直近30回の全セット球の使用内訳"):
-                st.write(trends['set_ball_counts'])
         else:
             st.warning("セット球データがCSVに存在しません。")
 
-    # ビアス式データの取得
-    bias_nums, is_fallback = fetch_bias_numbers(loto_choice)
+    # --- ビアス式データの厳格取得 ---
+    bias_nums, debug_info = fetch_bias_numbers_strict(loto_choice)
     
     st.markdown("---")
     st.subheader(f"🎯 ビアス式数字 × 直近30回フィルター 最終予想")
     
-    if is_fallback:
-        st.info("⚠️ 創楽のウェブサイトからリアルタイム取得ができなかったため、標準バックアップ数字を使用しています。")
-    else:
-        st.success(f"✅ 創楽「ビアス式 絞り込み」から {len(bias_nums)} 個のベース数字の同期に成功しました。")
+    # 【変更点】通信成功時のみ予想ブロックを表示。失敗時は即時エラー停止。
+    if debug_info["success"] and bias_nums is not None:
+        st.success(f"✅ 【通信成功】創楽のWebサイトから、最新の絞り込み数字 {debug_info['numbers_found']} 個をリアルタイムで同期しました！")
         
-    st.write(f"**分析のベースにしたビアス数字:**")
-    st.code(", ".join(map(str, bias_nums)))
-    st.write(f"**前回（最新）の本数字出目:** {sorted(last_drawn_nums)}")
+        st.write(f"**分析のベースにしたビアス数字:**")
+        st.code(", ".join(map(str, bias_nums)))
+        st.write(f"**前回（最新）の本数字出目:** {sorted(last_drawn_nums)}")
 
-    # 予想実行ボタン
-    if st.button(f"🔮 上記の傾向をすべて満たす組み合わせを抽出する", type="primary"):
-        results = generate_advanced_prediction(bias_nums, loto_choice, trends, last_drawn_nums, prediction_rows)
-        
-        st.markdown("### 🏹 厳選された予想パターン")
-        for i, res in enumerate(results, 1):
-            balls = "  ".join([f"`{num:02d}`" for num in res])
-            res_sum = sum(res)
-            res_odds = len([x for x in res if x % 2 != 0])
-            res_even = len(res) - res_odds
+        # 予想実行ボタン（通信成功時のみクリック可能）
+        if st.button(f"🔮 上記の傾向をすべて満たす組み合わせを抽出する", type="primary"):
+            results = generate_advanced_prediction(bias_nums, loto_choice, trends, last_drawn_nums, prediction_rows)
             
-            st.markdown(f"**パターン {i:02d}** : {balls} *(合計: {res_sum} / 奇偶比: {res_odds}:{res_even})*")
+            st.markdown("### 🏹 厳選された予想パターン")
+            for i, res in enumerate(results, 1):
+                balls = "  ".join([f"`{num:02d}`" for num in res])
+                res_sum = sum(res)
+                res_odds = len([x for x in res if x % 2 != 0])
+                res_even = len(res) - res_odds
+                
+                st.markdown(f"**パターン {i:02d}** : {balls} *(合計: {res_sum} / 奇偶比: {res_odds}:{res_even})*")
+    else:
+        # 取得失敗時の表示（バックアップ数字は出さず、ボタンも非表示にして停止）
+        st.error("❌ 取得失敗：創楽のWebサイトから最新の絞り込み数字をスクレイピングできませんでした。")
+        with st.expander("🔍 詳しい通信エラーの原因（デバッグ情報）"):
+            st.write(f"**ステータスコード:** {debug_info['status_code']}")
+            st.write(f"**エラー詳細:** {debug_info['msg']}")
