@@ -77,7 +77,7 @@ def load_and_analyze_history(loto_type):
     else:
         return None, None, "CSVファイルの読み込みに失敗しました。"
     
-    # 提供されたCSVの列名に完全準拠
+    # 提供されたCSVの列名（第X数字）に完全準拠
     if loto_type == "ロト7":
         main_cols = [f"第{i}数字" for i in range(1, 8)]
     elif loto_type == "ロト6":
@@ -88,16 +88,19 @@ def load_and_analyze_history(loto_type):
     if not all(col in df.columns for col in main_cols):
         return None, None, f"CSV内にターゲット列名が見つかりません。列名が「第1数字」等になっているか確認してください。"
         
-    # 全データの本数字を数値リスト化して格納
+    # 全データの本数字を数値リスト化して格納（float対策としてint(float())で安全に変換）
+    def clean_row(row):
+        return sorted([int(float(i)) for i in row if pd.notna(i) and str(i).strip() != ''])
+        
     df['numbers_list'] = df[main_cols].values.tolist()
-    df['numbers_list'] = df['numbers_list'].apply(lambda x: sorted([int(i) for i in x if pd.notna(i)]))
+    df['numbers_list'] = df['numbers_list'].apply(clean_row)
     
-    # 傾向の先行一括計算
+    # 傾向の一括計算
     df['sum_val'] = df['numbers_list'].apply(sum)
     df['odds_count'] = df['numbers_list'].apply(lambda x: len([i for i in x if i % 2 != 0]))
     df['has_serial'] = df['numbers_list'].apply(lambda x: any(x[i+1] - x[i] == 1 for i in range(len(x)-1)))
     
-    # 「1つ前の回」の数字をシフト（昇順データなので、shift(1)が過去回になる）
+    # 「1つ前の回」の数字をシフト（下に行くほど新しい昇順データなので、shift(1)が1つ前の過去回になる）
     df['prev_numbers'] = df['numbers_list'].shift(1)
     
     # ひっぱり計算
@@ -142,7 +145,7 @@ def load_and_analyze_history(loto_type):
     return analysis, last_drawn, None
 
 
-# --- トレンドフィルター型・次世代予想ロジック ---
+# --- トレンドフィルター型・予想ロジック ---
 def generate_advanced_prediction(bias_numbers, loto_type, trend_analysis, last_numbers, count=5):
     loto_rules = {
         "ロト7": {"pick": 7, "max": 37},
@@ -164,16 +167,15 @@ def generate_advanced_prediction(bias_numbers, loto_type, trend_analysis, last_n
     valid_combinations = []
     attempts = 0
     
-    # 膨大なランダムシミュレーションから、直近30回の全傾向を満たすものだけを「ふるい落とし」
+    # シミュレーションによる絞り込み（ふるい落とし）
     while len(valid_combinations) < count and attempts < 30000:
         attempts += 1
         sample = sorted(random.sample(bias_numbers, rule["pick"]))
         
-        # 1. 合計数フィルター
-        if not (trend_analysis["sum_min"] <= sum(sample) <= trend_analysis["max"]):
-            s_val = sum(sample)
-            if not (trend_analysis["sum_min"] <= s_val <= trend_analysis["sum_max"]):
-                continue
+        # 1. 【バグ修正済み】合計数フィルター
+        s_val = sum(sample)
+        if not (trend_analysis["sum_min"] <= s_val <= trend_analysis["sum_max"]):
+            continue
                 
         # 2. 奇数偶数比フィルター (最頻値から±1個まで許容)
         o_val = len([x for x in sample if x % 2 != 0])
@@ -200,7 +202,7 @@ def generate_advanced_prediction(bias_numbers, loto_type, trend_analysis, last_n
         if sample not in valid_combinations:
             valid_combinations.append(sample)
             
-    # 万が一、条件が厳しすぎて目標数に達さなかった場合のセーフティ
+    # 条件が厳しすぎて万が一目標数に達さなかった場合のセーフティ
     if len(valid_combinations) < count:
         for _ in range(count - len(valid_combinations)):
             valid_combinations.append(sorted(random.sample(bias_numbers, rule["pick"])))
@@ -213,8 +215,8 @@ def predict_next_set_ball(set_counts):
     if not set_counts or "未設定" in set_counts:
         return "データなし", "ー"
     sorted_sets = sorted(set_counts.items(), key=lambda x: x[1], reverse=True)
-    hot_set = sorted_sets[0][0]  # 直近30回で最多登場
-    cold_set = sorted_sets[-1][0] # 直近30回で最少登場
+    hot_set = sorted_sets[0][0]  
+    cold_set = sorted_sets[-1][0] 
     return hot_set, cold_set
 
 
@@ -233,11 +235,10 @@ trends, last_drawn_nums, error_msg = load_and_analyze_history(loto_choice)
 if error_msg:
     st.error(error_msg)
 else:
-    # 画面を2カラムに分割してダッシュボード化
     col1, col2 = st.columns([1, 1])
     
     with col1:
-        st.subheader(f"📊 【本物】直近30回の傾向分析 ({loto_choice})")
+        st.subheader(f"📊 直近30回の傾向分析 ({loto_choice})")
         trend_df = pd.DataFrame({
             "分析項目": ["① 合計数の出現範囲", "① 合計数の平均値", "② 最も多い奇数個数", "③ 連番の発生確率", "④ 平均ひっぱり個数", "⑤ 平均スライド個数"],
             "直近30回のリアル実績値": [
