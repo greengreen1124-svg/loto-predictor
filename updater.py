@@ -51,7 +51,7 @@ def fetch_latest_draw_from_url(loto_type):
                     set_ball = g.upper()
                     break
         
-        # --- [改善] 当選番号の抽出（ハイブリッド型: テーブル解析 + ページ全体解析の二段構え） ---
+        # --- 当選番号の抽出（ハイブリッド型: テーブル解析 + ページ全体解析の二段構え） ---
         main_part = None
         bonus_part = None
         
@@ -160,7 +160,8 @@ def update_csv_file(loto_type, filename):
             except Exception as csv_err:
                 return df, f"⚠️ 最新回（第 {latest_drawn_info['開催回']} 回）を検出・反映しましたが、CSVへの永続保存に失敗しました: {str(csv_err)}"
         else:
-            return df, f"ℹ️ CSVデータは最新の状態です（最新の同期回: 第 {current_max_round} 回）。"
+            # 【変更箇所】最新データがすでにある場合、回数だけでなく抽選日（日付）もメッセージに含める
+            return df, f"ℹ️ CSVデータは最新の状態です（最新の同期回: 第 {current_max_round} 回 / {latest_drawn_info['日付']} 抽選）。"
     else:
         return df, f"⚠️ 抽選結果の自動同期スキップ: {scrape_msg}（CSVの既存データで分析を継続します）"
 
