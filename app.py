@@ -6,7 +6,7 @@ from bs4 import BeautifulSoup
 import re
 import random
 import os
-# 【重要】作成した自動更新用モジュールをインポート
+# 自動更新用モジュールをインポート
 import updater
 
 # ページの設定
@@ -74,7 +74,7 @@ def load_and_analyze_history(loto_type):
     }
     filename = file_map[loto_type]
     
-    # 【別ファイル連携】updater.py を呼び出し、最新結果を自動追加したデータフレームを取得
+    # updater.py を呼び出し、最新結果を自動追加したデータフレームを取得
     df, update_info_msg = updater.update_csv_file(loto_type, filename)
     
     if df is None:
@@ -122,7 +122,6 @@ def load_and_analyze_history(loto_type):
     recent_30 = df.tail(30)
     set_counts = recent_30['セット'].value_counts().to_dict() if 'セット' in df.columns else {"未設定": 1}
     
-    # 画面表示用に最新行のデータ（回数、日付）を取得
     last_row = df.iloc[-1]
     
     analysis = {
@@ -217,73 +216,74 @@ prediction_rows = st.sidebar.slider("予想する組み合わせ数", 1, 10, 5)
 # 過去データ解析と自動更新の実行
 trends, last_drawn_nums, error_msg, update_msg = load_and_analyze_history(loto_choice)
 
+# 💡 安全弁：重大なエラー（ファイル未検出など）が発生した場合は分かりやすく表示して安全に停止する
 if error_msg:
     st.error(error_msg)
+    st.info("💡 対策：GitHubリポジトリのトップ（app.pyと同じ場所）にCSVファイルが存在するか確認してください。")
+    st.stop()
+
+# CSV自動更新ステータスの通知表示
+if "🎉" in update_msg:
+    st.success(update_msg)
+elif "ℹ️" in update_msg:
+    st.info(update_msg)
 else:
-    # CSV自動更新ステータスの通知表示
-    if "🎉" in update_msg:
-        st.success(update_msg)
-    elif "ℹ️" in update_msg:
-        st.info(update_msg)
+    st.warning(update_msg)
+
+col1, col2 = st.columns([1, 1])
+
+with col1:
+    st.subheader(f"📊 直近30回の傾向分析 ({loto_choice})")
+    trend_df = pd.DataFrame({
+        "分析項目": ["① 合計数の出現範囲", "① 合計数の平均値", "② 最も多い奇数個数", "③ 連番の発生確率", "④ 平均ひっぱり個数", "⑤ 平均スライド個数"],
+        "直近30回のリアル実績値": [
+            f"{trends['sum_min']} 〜 {trends['sum_max']}",
+            f"{trends['sum_avg']} ",
+            f"{trends['odds_mode']} 個",
+            f"{trends['serial_rate']*100:.1f} %",
+            f"{trends['back_avg']:.1f} 個",
+            f"{trends['slide_avg']:.1f} 個"
+        ]
+    })
+    st.table(trend_df)
+    
+with col2:
+    st.subheader("🔮 次回セット球の予測")
+    hot_set, cold_set = predict_next_set_ball(trends['set_ball_counts'])
+    if hot_set != "データなし":
+        st.metric(label="🔥 本命トレンド球（直近30回で最も使われている）", value=f"{hot_set} セット")
+        st.metric(label="❄️ 大穴デジタル球（直近30回で出現が最も滞っている）", value=f"{cold_set} セット")
     else:
-        st.warning(update_msg)
+        st.warning("セット球データがCSVに存在しません。")
 
-    col1, col2 = st.columns([1, 1])
-    
-    with col1:
-        st.subheader(f"📊 直近30回の傾向分析 ({loto_choice})")
-        trend_df = pd.DataFrame({
-            "分析項目": ["① 合計数の出現範囲", "① 合計数の平均値", "② 最も多い奇数個数", "③ 連番の発生確率", "④ 平均ひっぱり個数", "⑤ 平均スライド個数"],
-            "直近30回のリアル実績値": [
-                f"{trends['sum_min']} 〜 {trends['sum_max']}",
-                f"{trends['sum_avg']} ",
-                f"{trends['odds_mode']} 個",
-                f"{trends['serial_rate']*100:.1f} %",
-                f"{trends['back_avg']:.1f} 個",
-                f"{trends['slide_avg']:.1f} 個"
-            ]
-        })
-        st.table(trend_df)
-        
-    with col2:
-        st.subheader("🔮 次回セット球の予測")
-        hot_set, cold_set = predict_next_set_ball(trends['set_ball_counts'])
-        if hot_set != "データなし":
-            st.metric(label="🔥 本命トレンド球（直近30回で最も使われている）", value=f"{hot_set} セット")
-            st.metric(label="❄️ 大穴デジタル球（直近30回で出現が最も滞っている）", value=f"{cold_set} セット")
-        else:
-            st.warning("セット球データがCSVに存在しません。")
+# ビアス式データの厳格取得
+bias_nums, debug_info = fetch_bias_numbers_strict(loto_choice)
 
-    # ビアス式データの厳格取得
-    bias_nums, debug_info = fetch_bias_numbers_strict(loto_choice)
-    
-    st.markdown("---")
-    st.subheader(f"🎯 ビアス式数字 × 直近30回フィルター 最終予想")
-    
-    if debug_info["success"] and bias_nums is not None:
-        st.success(f"✅ 【通信成功】創楽のWebサイトから最新のベース数字の同期に成功しました。")
-        
-        st.write(f"**分析のベースにしたビアス数字:**")
-        st.code(", ".join(map(str, bias_nums)))
-        
-        # 横並びに配置された最新回の回数、抽選日、出目
-        st.write(f"**前回（最新）の本数字出目:** 🏆 **第 {trends['last_round']} 回** （{trends['last_date']} 抽選）")
-        st.code("  ".join([f"{num:02d}" for num in sorted(last_drawn_nums)]))
+st.markdown("---")
+st.subheader(f"🎯 ビアス式数字 × 直近30回フィルター 最終予想")
 
-        # 予想実行ボタン
-        if st.button(f"🔮 上記の傾向をすべて満たす組み合わせを抽出する", type="primary"):
-            results = generate_advanced_prediction(bias_nums, loto_choice, trends, last_drawn_nums, prediction_rows)
+if debug_info["success"] and bias_nums is not None:
+    st.success(f"✅ 【通信成功】創楽のWebサイトから最新のベース数字の同期に成功しました。")
+    
+    st.write(f"**分析のベースにしたビアス数字:**")
+    st.code(", ".join(map(str, bias_nums)))
+    
+    st.write(f"**前回（最新）の本数字出目:** 🏆 **第 {trends['last_round']} 回** （{trends['last_date']} 抽選）")
+    st.code("  ".join([f"{num:02d}" for num in sorted(last_drawn_nums)]))
+
+    if st.button(f"🔮 上記の傾向をすべて満たす組み合わせを抽出する", type="primary"):
+        results = generate_advanced_prediction(bias_nums, loto_choice, trends, last_drawn_nums, prediction_rows)
+        
+        st.markdown("### 🏹 厳選された予想パターン")
+        for i, res in enumerate(results, 1):
+            balls = "  ".join([f"`{num:02d}`" for num in res])
+            res_sum = sum(res)
+            res_odds = len([x for x in res if x % 2 != 0])
+            res_even = len(res) - res_odds
             
-            st.markdown("### 🏹 厳選された予想パターン")
-            for i, res in enumerate(results, 1):
-                balls = "  ".join([f"`{num:02d}`" for num in res])
-                res_sum = sum(res)
-                res_odds = len([x for x in res if x % 2 != 0])
-                res_even = len(res) - res_odds
-                
-                st.markdown(f"**パターン {i:02d}** : {balls} *(合計: {res_sum} / 奇偶比: {res_odds}:{res_even})*")
-    else:
-        st.error("❌ 取得失敗：創楽のWebサイトから最新の絞り込み数字をスクレイピングできませんでした。")
-        with st.expander("🔍 詳しい通信エラーの原因（デバッグ情報）"):
-            st.write(f"**ステータスコード:** {debug_info['status_code']}")
-            st.write(f"**エラー詳細:** {debug_info['msg']}")
+            st.markdown(f"**パターン {i:02d}** : {balls} *(合計: {res_sum} / 奇偶比: {res_odds}:{res_even})*")
+else:
+    st.error("❌ 取得失敗：創楽のWebサイトから最新の絞り込み数字をスクレイピングできませんでした。")
+    with st.expander("🔍 詳しい通信エラーの原因（デバッグ情報）"):
+        st.write(f"**ステータスコード:** {debug_info['status_code']}")
+        st.write(f"**エラー詳細:** {debug_info['msg']}")
