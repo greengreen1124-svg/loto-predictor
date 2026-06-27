@@ -74,11 +74,36 @@ def load_and_analyze_history(loto_type):
     }
     filename = file_map[loto_type]
     
-    # updater.py を呼び出し、最新結果を自動追加したデータフレームを取得
-    df, update_info_msg = updater.update_csv_file(loto_type, filename)
+    df = None
+    update_info_msg = ""
     
+    # 【対策1】updater.pyの呼び出しを保護。エラーが起きてもアプリを落とさない
+    try:
+        if hasattr(updater, 'update_csv_file'):
+            df, update_info_msg = updater.update_csv_file(loto_type, filename)
+        else:
+            update_info_msg = "ℹ️ updater.pyにupdate_csv_file関数が見つかりません。直接読み込みを開始します。"
+    except Exception as e:
+        update_info_msg = f"⚠️ 自動更新プロセスで制限が発生しました（既存データで解析します）: {str(e)}"
+    
+    # 【対策2】自動更新でデータが取得できなかった場合のバックアップ（直接CSV読み込み）
     if df is None:
-        return None, None, update_info_msg, None
+        if os.path.exists(filename):
+            try:
+                # まず一般的なUTF-8で読み込み
+                df = pd.read_csv(filename, encoding='utf-8')
+            except Exception:
+                try:
+                    # 失敗した場合はShift-JIS（Excel保存用）を試す
+                    df = pd.read_csv(filename, encoding='shift_jis')
+                except Exception as e:
+                    return None, None, f"❌ CSVファイルの読み込みに失敗しました（文字コードエラー）: {str(e)}", update_info_msg
+        else:
+            return None, None, f"❌ CSVファイル「{filename}」がルートディレクトリに見つかりません。", update_info_msg
+
+    # データが空の場合の防御
+    if df is None or df.empty:
+        return None, None, f"❌ {filename} のデータが空、または正しく読み込めませんでした。", update_info_msg
         
     if loto_type == "ロト7":
         main_cols = [f"第{i}数字" for i in range(1, 8)]
@@ -88,7 +113,7 @@ def load_and_analyze_history(loto_type):
         main_cols = [f"第{i}数字" for i in range(1, 6)]
         
     if not all(col in df.columns for col in main_cols):
-        return None, None, f"CSV内にターゲット列名が見つかりません。", None
+        return None, None, f"❌ CSV内に解析に必要なターゲット列名（第1数字など）が見つかりません。", update_info_msg
         
     def clean_row(row):
         return sorted([int(float(i)) for i in row if pd.notna(i) and str(i).strip() != ''])
@@ -125,16 +150,16 @@ def load_and_analyze_history(loto_type):
     last_row = df.iloc[-1]
     
     analysis = {
-        "sum_min": int(recent_30['sum_val'].quantile(0.1)),
-        "sum_max": int(recent_30['sum_val'].quantile(0.9)),
-        "sum_avg": int(recent_30['sum_val'].mean()),
+        "sum_min": int(recent_30['sum_val'].quantile(0.1)) if len(recent_30) > 0 else 10,
+        "sum_max": int(recent_30['sum_val'].quantile(0.9)) if len(recent_30) > 0 else 200,
+        "sum_avg": int(recent_30['sum_val'].mean()) if len(recent_30) > 0 else 100,
         "odds_mode": int(recent_30['odds_count'].mode()[0] if not recent_30['odds_count'].empty else len(main_cols)/2),
-        "serial_rate": float(recent_30['has_serial'].mean()),
-        "back_avg": float(recent_30['back_count'].mean()),
-        "slide_avg": float(recent_30['slide_count'].mean()),
+        "serial_rate": float(recent_30['has_serial'].mean()) if len(recent_30) > 0 else 0.5,
+        "back_avg": float(recent_30['back_count'].mean()) if len(recent_30) > 0 else 1.0,
+        "slide_avg": float(recent_30['slide_count'].mean()) if len(recent_30) > 0 else 1.0,
         "set_ball_counts": set_counts,
-        "last_round": last_row['開催回'],
-        "last_date": last_row['日付']
+        "last_round": last_row['開催回'] if '開催回' in last_row else '不明',
+        "last_date": last_row['日付'] if '日付' in last_row else '不明'
     }
     
     last_drawn = df['numbers_list'].iloc[-1]
@@ -216,45 +241,51 @@ prediction_rows = st.sidebar.slider("予想する組み合わせ数", 1, 10, 5)
 # 過去データ解析と自動更新の実行
 trends, last_drawn_nums, error_msg, update_msg = load_and_analyze_history(loto_choice)
 
-# 💡 安全弁：重大なエラー（ファイル未検出など）が発生した場合は分かりやすく表示して安全に停止する
+# 重大なエラー（ファイル未検出など）が発生した場合は安全に停止する
 if error_msg:
     st.error(error_msg)
-    st.info("💡 対策：GitHubリポジトリのトップ（app.pyと同じ場所）にCSVファイルが存在するか確認してください。")
     st.stop()
 
-# CSV自動更新ステータスの通知表示
-if "🎉" in update_msg:
-    st.success(update_msg)
-elif "ℹ️" in update_msg:
-    st.info(update_msg)
-else:
-    st.warning(update_msg)
+# 【対策3】update_msg が 空(None) の場合の判定バグを完全に回避
+if update_msg:
+    if "🎉" in update_msg:
+        st.success(update_msg)
+    elif "ℹ️" in update_msg:
+        st.info(update_msg)
+    else:
+        st.warning(update_msg)
 
 col1, col2 = st.columns([1, 1])
 
 with col1:
     st.subheader(f"📊 直近30回の傾向分析 ({loto_choice})")
-    trend_df = pd.DataFrame({
-        "分析項目": ["① 合計数の出現範囲", "① 合計数の平均値", "② 最も多い奇数個数", "③ 連番の発生確率", "④ 平均ひっぱり個数", "⑤ 平均スライド個数"],
-        "直近30回のリアル実績値": [
-            f"{trends['sum_min']} 〜 {trends['sum_max']}",
-            f"{trends['sum_avg']} ",
-            f"{trends['odds_mode']} 個",
-            f"{trends['serial_rate']*100:.1f} %",
-            f"{trends['back_avg']:.1f} 個",
-            f"{trends['slide_avg']:.1f} 個"
-        ]
-    })
-    st.table(trend_df)
+    if trends:
+        trend_df = pd.DataFrame({
+            "分析項目": ["① 合計数の出現範囲", "① 合計数の平均値", "② 最も多い奇数個数", "③ 連番の発生確率", "④ 平均ひっぱり個数", "⑤ 平均スライド個数"],
+            "直近30回のリアル実績値": [
+                f"{trends['sum_min']} 〜 {trends['sum_max']}",
+                f"{trends['sum_avg']} ",
+                f"{trends['odds_mode']} 個",
+                f"{trends['serial_rate']*100:.1f} %",
+                f"{trends['back_avg']:.1f} 個",
+                f"{trends['slide_avg']:.1f} 個"
+            ]
+        })
+        st.table(trend_df)
+    else:
+        st.warning("傾向データが算出できませんでした。")
     
 with col2:
     st.subheader("🔮 次回セット球の予測")
-    hot_set, cold_set = predict_next_set_ball(trends['set_ball_counts'])
-    if hot_set != "データなし":
-        st.metric(label="🔥 本命トレンド球（直近30回で最も使われている）", value=f"{hot_set} セット")
-        st.metric(label="❄️ 大穴デジタル球（直近30回で出現が最も滞っている）", value=f"{cold_set} セット")
+    if trends:
+        hot_set, cold_set = predict_next_set_ball(trends['set_ball_counts'])
+        if hot_set != "データなし":
+            st.metric(label="🔥 本命トレンド球（直近30回で最も使われている）", value=f"{hot_set} セット")
+            st.metric(label="❄️ 大穴デジタル球（直近30回で出現が最も滞っている）", value=f"{cold_set} セット")
+        else:
+            st.warning("セット球データがCSVに存在しません。")
     else:
-        st.warning("セット球データがCSVに存在しません。")
+        st.warning("データ不足のため予測をスキップします。")
 
 # ビアス式データの厳格取得
 bias_nums, debug_info = fetch_bias_numbers_strict(loto_choice)
@@ -262,7 +293,7 @@ bias_nums, debug_info = fetch_bias_numbers_strict(loto_choice)
 st.markdown("---")
 st.subheader(f"🎯 ビアス式数字 × 直近30回フィルター 最終予想")
 
-if debug_info["success"] and bias_nums is not None:
+if debug_info["success"] and bias_nums is not None and trends:
     st.success(f"✅ 【通信成功】創楽のWebサイトから最新のベース数字の同期に成功しました。")
     
     st.write(f"**分析のベースにしたビアス数字:**")
