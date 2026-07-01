@@ -112,7 +112,7 @@ def fetch_bias_numbers_strict(loto_type):
     return None, status_log
 
 
-# --- 候補が1つに絞り込めるまで無限に遡る相性遷移予測関数（本命・大穴の重複ガード付） ---
+# --- 候補が1つに絞り込めるまで無限に遡る相性遷移予測関数 ---
 def predict_next_set_ball_advanced(df):
     if 'セット' not in df.columns or len(df) < 2:
         return "データなし", "ー", "データ不足のため分析できません"
@@ -178,7 +178,7 @@ def predict_next_set_ball_advanced(df):
                     cold_set = s
                     break
 
-    status_msg = f"前回【{last_set}セット】の直後傾向を解析（候補を1つに絞るため、過去 {current_window} 回まで自動で遡って確定）"
+    status_msg = f"前回【{last_set}セット】の直後傾向を解析（過去 {current_window} 回まで自動で遡って確定）"
     if len(hots) > 1 or len(colds) > 1:
         status_msg += " ※全データを遡っても同数のため、直近の優位性から自動選出"
 
@@ -266,6 +266,13 @@ def load_and_analyze_history(loto_type):
     
     hot_set, cold_set, set_status_msg = predict_next_set_ball_advanced(df)
     
+    # 選択肢として提示する、CSV内に存在する一意なセット球のリストを取得
+    all_existing_sets = []
+    if 'セット' in df.columns:
+        all_existing_sets = sorted([str(s).strip() for s in df['セット'].dropna().unique() if str(s).strip() != "" and s != "未設定"])
+    if not all_existing_sets:
+        all_existing_sets = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J']
+    
     analysis = {
         "sum_min": int(recent_30['sum_val'].quantile(0.1)) if len(recent_30) > 0 else 10,
         "sum_max": int(recent_30['sum_val'].quantile(0.9)) if len(recent_30) > 0 else 200,
@@ -279,7 +286,8 @@ def load_and_analyze_history(loto_type):
         "last_date": last_row['日付'] if '日付' in last_row else '不明',
         "hot_set": hot_set,
         "cold_set": cold_set,
-        "set_status_msg": set_status_msg
+        "set_status_msg": set_status_msg,
+        "all_sets": all_existing_sets  # 選択UI用に引き渡し
     }
     
     last_drawn = df['numbers_list'].iloc[-1]
@@ -388,14 +396,25 @@ with col2:
     st.subheader("🔮 次回セット球の予測")
     if trends:
         hot_set = trends.get('hot_set', 'データなし')
-        cold_set = trends.get('cold_set', 'ー')
         status_msg = trends.get('set_status_msg', '')
+        available_sets = trends.get('all_sets', ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J'])
         
         if hot_set != "データなし":
             st.caption("💡 【AI解析ステータス】")
             st.info(status_msg)
-            st.metric(label="🔥 本命相性球（前回セットの後に最も連鎖しやすい）", value=f"{hot_set} セット")
-            st.metric(label="❄️ 大穴相性球（前回セットの後に最も選ばれにくい）", value=f"{cold_set} セット")
+            
+            # AIが予測した相性セット球を初期選択状態(インデックス)にする
+            try:
+                default_idx = available_sets.index(str(hot_set).strip())
+            except ValueError:
+                default_idx = 0
+            
+            # 大穴を削除し、本命をドロップダウンで手動変更・選択可能なUIに変更
+            selected_set = st.selectbox(
+                "🔥 本命相性球（AI予測値が初期セットされています。手動選択も可能です）",
+                options=available_sets,
+                index=default_idx
+            )
         else:
             st.warning("セット球データがCSVに存在しないか、解析できませんでした。")
     else:
