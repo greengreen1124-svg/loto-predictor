@@ -5,12 +5,13 @@ import re
 import os
 import datetime
 
-# 指定の一覧URLから最新（一番下）の「開催回・抽選日・セット球・当選番号」を抽出する関数
+# 各ロトのトップページにある「抽選結果速報」直下のテーブルから最新データを抽出する関数
 def fetch_latest_draw_from_url(loto_type):
+    # 🔗 ユーザー指定のトップページURL
     urls = {
-        "ロト7": "http://sougaku.com/loto7/data/list1/index_10.html",
-        "ロト6": "http://sougaku.com/loto6/data/list1/index_10.html",
-        "ミニロト": "http://sougaku.com/miniloto/data/list1/index_10.html"
+        "ロト7": "http://sougaku.com/loto7/",
+        "ロト6": "http://sougaku.com/loto6/",
+        "ミニロト": "http://sougaku.com/miniloto/"
     }
     url = urls[loto_type]
     headers = {
@@ -32,94 +33,92 @@ def fetch_latest_draw_from_url(loto_type):
         rule = rules[loto_type]
         total_needed = rule["main"] + rule["bonus"]
         
-        # 💡 最新10回ページで「年(西暦)」が行内で省略されている場合のための自動補完システム
-        current_year = datetime.datetime.now().year
-        page_text = soup.get_text()
-        year_match = re.search(r'(20\d{2})年', page_text)
-        default_year = int(year_match.group(1)) if year_match else current_year
-        
-        valid_results = []
-        
-        # ページ内のすべてのテーブルのすべての行（tr）を走査
-        for table in soup.find_all('table'):
-            for tr in table.find_all('tr'):
-                cells = [td.get_text(strip=True) for td in tr.find_all(['td', 'th'])]
-                if len(cells) < 5:  # 列数が少なすぎるヘッダーや空白行はスキップ
-                    continue
-                
-                # 1. 開催回の取得（1番目のセルから数値を抽出）
-                draw_round = None
-                rm = re.search(r'(\d+)', cells[0])
-                if rm:
-                    draw_round = int(rm.group(1))
-                
-                if not draw_round or draw_round < 1:
-                    continue
-                
-                # 2. 日付の取得（2番目のセルから柔軟に解析・年の自動補完付き）
-                draw_date = None
-                date_text = cells[1]
-                
-                dm1 = re.search(r'(20\d{2})[年/\.-](\d{1,2})[月/\.-](\d{1,2})', date_text)
-                dm2 = re.search(r'(\d{1,2})[月/](\d{1,2})', date_text)
-                
-                if dm1:
-                    draw_date = f"{dm1.group(1)}/{int(dm1.group(2)):02d}/{int(dm1.group(3)):02d}"
-                elif dm2:
-                    draw_date = f"{default_year}/{int(dm2.group(1)):02d}/{int(dm2.group(2)):02d}"
-                else:
-                    # 日付の形式が合わなければ、ヘッダー行等とみなしてスキップ
-                    continue
-                
-                # 3. セット球の取得（末尾のセルからA-Jのアルファベットを探索）
-                set_ball = "A"
-                for cell in reversed(cells):
-                    sm = re.search(r'\b([A-J])\b', cell, re.IGNORECASE)
-                    if sm:
-                        set_ball = sm.group(1).upper()
-                        break
-                
-                # 4. 当選番号の抽出（インデックス2以降のセルから数字を順番に正確に回収）
-                pure_nums = []
-                for cell in cells[2:]:
-                    # セット球のセル（単体のアルファベット）はスキップ
-                    if re.search(r'\b[A-J]\b', cell, re.IGNORECASE) and len(cell) <= 3:
-                        continue
-                    
-                    num_matches = re.findall(r'\d+', cell)
-                    for n in num_matches:
-                        val = int(n)
-                        if 1 <= val <= rule["max"]:
-                            pure_nums.append(val)
-                
-                # 5. データの検証（本数字＋ボーナスの個数が正確に揃っているか）
-                if len(pure_nums) >= total_needed:
-                    main_nums = sorted(pure_nums[:rule["main"]])
-                    bonus_nums = pure_nums[rule["main"]:total_needed]
-                    
-                    # 本数字に重複がないかチェック
-                    if len(set(main_nums)) == rule["main"]:
-                        result_dict = {
-                            "開催回": draw_round,
-                            "日付": draw_date,
-                            "セット": set_ball
-                        }
-                        for i, n in enumerate(main_nums, 1):
-                            result_dict[f"第{i}数字"] = n
-                        
-                        if loto_type == "ロト7":
-                            result_dict["BONUS数字1"] = bonus_nums[0]
-                            result_dict["BONUS数字2"] = bonus_nums[1]
-                        else:
-                            result_dict["BONUS数字"] = bonus_nums[0]
-                        
-                        valid_results.append(result_dict)
-        
-        if valid_results:
-            # 💡 ご指定通り、リストの一番下（最下行）を最新回として採用して返却
-            return valid_results[-1], "成功"
+        # 🔍 1. 各ページ固有の「抽選結果速報」の見出しテキストを全角半角対応で検索
+        if loto_type == "ロト7":
+            pattern = r"ロト[7７].*抽選結果速報"
+        elif loto_type == "ロト6":
+            pattern = r"ロト[6６].*抽選結果速報"
+        else:
+            pattern = r"ミニロト.*抽選結果速報"
             
-        return None, "最新10回一覧テーブルから有効な結果行を検出・解析できませんでした。"
+        anchor = soup.find(string=re.compile(pattern))
+        if not anchor:
+            # 万が一見つからない場合のフォールバック
+            anchor = soup.find(string=re.compile("抽選結果速報"))
+            
+        if not anchor:
+            return None, f"ページ内に「{loto_type}抽選結果速報」の文字が見つかりませんでした。"
+            
+        # 🎯 2. 見出しの「すぐ後ろにある最初のテーブル」をピンポイントで取得（ノイズ排除）
+        table = anchor.find_next('table')
+        if not table:
+            return None, "抽選結果速報の見出しの下にテーブルが見つかりませんでした。"
+            
+        table_text = table.get_text()
+        current_year = datetime.datetime.now().year
+        
+        draw_round = None
+        draw_date = None
+        set_ball = "A"
+        pure_nums = []
+        
+        # 開催回の特定 (例: 第600回)
+        rm = re.search(r'第?\s*(\d+)\s*回', table_text)
+        if rm:
+            draw_round = int(rm.group(1))
+            
+        # 抽選日の特定 (例: 2026年6月25日 または 06/25)
+        dm1 = re.search(r'(20\d{2})[年/\.-](\d{1,2})[月/\.-](\d{1,2})', table_text)
+        dm2 = re.search(r'(\d{1,2})[月/](\d{1,2})', table_text)
+        if dm1:
+            draw_date = f"{dm1.group(1)}/{int(dm1.group(2)):02d}/{int(dm1.group(3)):02d}"
+        elif dm2:
+            draw_date = f"{current_year}/{int(dm2.group(1)):02d}/{int(dm2.group(2)):02d}"
+            
+        # セット球の特定 (例: Aセット、または単に A)
+        sm = re.search(r'\b([A-J])\b|([A-J])セット', table_text, re.IGNORECASE)
+        if sm:
+            set_ball = (sm.group(1) or sm.group(2)).upper()
+            
+        # 🧮 3. 同一セル内に文字と数字が同居していても安全に数字を抜くクリーンアップ処理
+        for cell in table.find_all(['td', 'th']):
+            cell_text = cell.get_text(strip=True)
+            
+            # 「第◯回」や「日付」の数字を誤検知しないよう、該当部分の文字列をあらかじめ消去
+            cell_text = re.sub(r'第?\s*\d+\s*回', '', cell_text)
+            cell_text = re.sub(r'(20\d{2})[年/\.-]\d{1,2}[月/\.-]\d{1,2}日?', '', cell_text)
+            cell_text = re.sub(r'\d{1,2}[月/]\d{1,2}日?', '', cell_text)
+            
+            # 残ったクリーンなテキストから純粋な当選番号（1〜MAX）のみを回収
+            num_matches = re.findall(r'\d+', cell_text)
+            for n in num_matches:
+                val = int(n)
+                if 1 <= val <= rule["max"]:
+                    pure_nums.append(val)
+                    
+        # 💡 4. データの検証と整形
+        if draw_round and draw_date and len(pure_nums) >= total_needed:
+            main_nums = sorted(pure_nums[:rule["main"]]) # 本数字は昇順ソート
+            bonus_nums = pure_nums[rule["main"]:total_needed]
+            
+            if len(set(main_nums)) == rule["main"]: # 重複チェック
+                result_dict = {
+                    "開催回": draw_round,
+                    "日付": draw_date,
+                    "セット": set_ball
+                }
+                for i, n in enumerate(main_nums, 1):
+                    result_dict[f"第{i}数字"] = n
+                
+                if loto_type == "ロト7":
+                    result_dict["BONUS数字1"] = bonus_nums[0]
+                    result_dict["BONUS数字2"] = bonus_nums[1]
+                else:
+                    result_dict["BONUS数字"] = bonus_nums[0]
+                
+                return result_dict, "成功"
+                
+        return None, f"速報テーブルから必要なデータを正しく解析できませんでした。(検出数字数: {len(pure_nums)})"
     except Exception as e:
         return None, f"通信・解析エラー: {str(e)}"
 
@@ -144,6 +143,7 @@ def update_csv_file(loto_type, filename):
     if latest_drawn_info:
         current_max_round = df['開催回'].max()
         if latest_drawn_info["開催回"] > current_max_round:
+            # 新しい最新回が見つかったら末尾に自動追記
             new_row_df = pd.DataFrame([latest_drawn_info])
             df = pd.concat([df, new_row_df], ignore_index=True)
             try:
