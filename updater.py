@@ -3,6 +3,7 @@ import requests
 from bs4 import BeautifulSoup
 import re
 import os
+import datetime
 
 # 指定の一覧URLから最新（一番下）の「開催回・抽選日・セット球・当選番号」を抽出する関数
 def fetch_latest_draw_from_url(loto_type):
@@ -31,58 +32,68 @@ def fetch_latest_draw_from_url(loto_type):
         rule = rules[loto_type]
         total_needed = rule["main"] + rule["bonus"]
         
+        # 💡 最新10回ページで「年(西暦)」が行内で省略されている場合のための自動補完システム
+        current_year = datetime.datetime.now().year
+        page_text = soup.get_text()
+        year_match = re.search(r'(20\d{2})年', page_text)
+        default_year = int(year_match.group(1)) if year_match else current_year
+        
         valid_results = []
         
         # ページ内のすべてのテーブルのすべての行（tr）を走査
         for table in soup.find_all('table'):
             for tr in table.find_all('tr'):
                 cells = [td.get_text(strip=True) for td in tr.find_all(['td', 'th'])]
-                if len(cells) < 4:  # セル数が少なすぎるヘッダーや空白行はスキップ
+                if len(cells) < 5:  # 列数が少なすぎるヘッダーや空白行はスキップ
                     continue
                 
+                # 1. 開催回の取得（1番目のセルから数値を抽出）
                 draw_round = None
+                rm = re.search(r'(\d+)', cells[0])
+                if rm:
+                    draw_round = int(rm.group(1))
+                
+                if not draw_round or draw_round < 1:
+                    continue
+                
+                # 2. 日付の取得（2番目のセルから柔軟に解析・年の自動補完付き）
                 draw_date = None
-                set_ball = None
+                date_text = cells[1]
+                
+                dm1 = re.search(r'(20\d{2})[年/\.-](\d{1,2})[月/\.-](\d{1,2})', date_text)
+                dm2 = re.search(r'(\d{1,2})[月/](\d{1,2})', date_text)
+                
+                if dm1:
+                    draw_date = f"{dm1.group(1)}/{int(dm1.group(2)):02d}/{int(dm1.group(3)):02d}"
+                elif dm2:
+                    draw_date = f"{default_year}/{int(dm2.group(1)):02d}/{int(dm2.group(2)):02d}"
+                else:
+                    # 日付の形式が合わなければ、ヘッダー行等とみなしてスキップ
+                    continue
+                
+                # 3. セット球の取得（末尾のセルからA-Jのアルファベットを探索）
+                set_ball = "A"
+                for cell in reversed(cells):
+                    sm = re.search(r'\b([A-J])\b', cell, re.IGNORECASE)
+                    if sm:
+                        set_ball = sm.group(1).upper()
+                        break
+                
+                # 4. 当選番号の抽出（インデックス2以降のセルから数字を順番に正確に回収）
                 pure_nums = []
-                
-                # 1. 開催回・日付・セット球を各セルから抽出
-                for cell in cells:
-                    # 開催回 (例: 第2114回)
-                    rm = re.search(r'第?\s*(\d+)\s*回', cell)
-                    if rm and not draw_round:
-                        draw_round = int(rm.group(1))
-                        
-                    # 抽選日 (例: 2026年6月25日 または 2026/06/25)
-                    dm = re.search(r'(\d{4})[年/\.-](\d{1,2})[月/\.-](\d{1,2})', cell)
-                    if dm and not draw_date:
-                        draw_date = f"{dm.group(1)}/{int(dm.group(2)):02d}/{int(dm.group(3)):02d}"
-                        
-                    # セット球 (例: Aセット、または単に H)
-                    sm = re.search(r'\b([A-J])\b|([A-J])セット', cell, re.IGNORECASE)
-                    if sm and not set_ball:
-                        set_ball = (sm.group(1) or sm.group(2)).upper()
-                
-                # 最初のセルに「回」の文字がなく単なる数字が入っている場合の補正
-                if not draw_round and cells[0].isdigit():
-                    draw_round = int(cells[0])
-                
-                # 2. 当選番号（本数字＋ボーナス）の抽出
-                # 開催回や日付セルの数字を誤認しないよう、文字（回,年,月,日,第,/）を含むセルはスキップ
-                for cell in cells:
-                    if any(x in cell for x in ['回', '年', '月', '日', '第', '/']):
+                for cell in cells[2:]:
+                    # セット球のセル（単体のアルファベット）はスキップ
+                    if re.search(r'\b[A-J]\b', cell, re.IGNORECASE) and len(cell) <= 3:
                         continue
-                    # セル内から純粋な数字のみを全抽出
+                    
                     num_matches = re.findall(r'\d+', cell)
                     for n in num_matches:
                         val = int(n)
                         if 1 <= val <= rule["max"]:
                             pure_nums.append(val)
                 
-                if not set_ball:
-                    set_ball = "A"  # 念のためのデフォルト値
-                
-                # 3. データのバリデーション（数字の個数が正確に揃っているか）
-                if draw_round and draw_date and len(pure_nums) >= total_needed:
+                # 5. データの検証（本数字＋ボーナスの個数が正確に揃っているか）
+                if len(pure_nums) >= total_needed:
                     main_nums = sorted(pure_nums[:rule["main"]])
                     bonus_nums = pure_nums[rule["main"]:total_needed]
                     
@@ -105,7 +116,7 @@ def fetch_latest_draw_from_url(loto_type):
                         valid_results.append(result_dict)
         
         if valid_results:
-            # 💡 「一番下の結果が最新回」というルールに基づき、リストの最後（最下行）を返却
+            # 💡 ご指定通り、リストの一番下（最下行）を最新回として採用して返却
             return valid_results[-1], "成功"
             
         return None, "最新10回一覧テーブルから有効な結果行を検出・解析できませんでした。"
@@ -133,7 +144,6 @@ def update_csv_file(loto_type, filename):
     if latest_drawn_info:
         current_max_round = df['開催回'].max()
         if latest_drawn_info["開催回"] > current_max_round:
-            # 新しい最新回が見つかったら末尾に自動追記
             new_row_df = pd.DataFrame([latest_drawn_info])
             df = pd.concat([df, new_row_df], ignore_index=True)
             try:
