@@ -22,17 +22,6 @@ def fetch_latest_draw_from_url(loto_type):
         
         response.encoding = response.apparent_encoding
         soup = BeautifulSoup(response.text, 'html.parser')
-        full_text = soup.get_text()
-        
-        # 1. 開催回と日付の抽出
-        round_match = re.search(r'第\s*(\d+)\s*回', full_text)
-        date_match = re.search(r'(\d{4})[年/\.-](\d{1,2})[月/\.-](\d{1,2})', full_text)
-        
-        if not round_match or not date_match:
-            return None, "ページ内から開催回または抽選日を特定できませんでした。"
-            
-        draw_round = int(round_match.group(1))
-        draw_date = f"{date_match.group(1)}/{int(date_match.group(2)):02d}/{int(date_match.group(3)):02d}"
         
         rules = {
             "ロト7": {"main": 7, "bonus": 2, "max": 37},
@@ -42,91 +31,79 @@ def fetch_latest_draw_from_url(loto_type):
         rule = rules[loto_type]
         total_nums_needed = rule["main"] + rule["bonus"]
         
-        # セット球の抽出 (A-J)
-        set_match = re.search(r'([A-J])\s*セット|セット\s*球?\s*[:：]?\s*([A-J])|([A-J])セット', full_text, re.IGNORECASE)
-        set_ball = "A"
-        if set_match:
-            for g in set_match.groups():
-                if g and len(g) == 1:
-                    set_ball = g.upper()
-                    break
-        
-        # --- 当選番号の抽出（ハイブリッド型: テーブル解析 + ページ全体解析の二段構え） ---
-        main_part = None
-        bonus_part = None
-        
-        # 第一段階：テーブル構造から正規表現で数字をスマートに抜き出す
+        full_text = soup.get_text()
+
+        # ページ内のすべてのテーブルを走査し、当選番号が書かれているテーブルを特定
         for table in soup.find_all('table'):
             table_text = table.get_text()
-            if '結果' in table_text or '当選' in table_text or f"第{draw_round}回" in table_text or 'ボーナス' in table_text:
-                # マスの区切りに依存せず、表の中から1〜2桁の数字をまとめて抽出
-                pure_nums = [int(n) for n in re.findall(r'\b\d{1,2}\b', table_text) if 1 <= int(n) <= rule["max"]]
+            
+            # 当選結果テーブルの条件：「回」が含まれ、かつ「結果」「当選」「ボーナス」などのキーワードがある
+            if '回' in table_text and ('結果' in table_text or '当選' in table_text or 'ボーナス' in table_text or '本数字' in table_text):
                 
-                # 開催回（例: 第668回の「668」）が混ざってインデックスがズレるのを防止
-                pure_nums = [n for n in pure_nums if n != draw_round]
+                # 【重要】テーブル内から正確にその結果の「開催回」を抽出（未来の予想回号に惑わされない）
+                round_match = re.search(r'第\s*(\d+)\s*回', table_text)
+                if not round_match:
+                    continue
+                draw_round = int(round_match.group(1))
+                
+                # 日付の抽出（テーブル内を優先、なければページ全体から）
+                date_match = re.search(r'(\d{4})[年/\.-](\d{1,2})[月/\.-](\d{1,2})', table_text)
+                if date_match:
+                    draw_date = f"{date_match.group(1)}/{int(date_match.group(2)):02d}/{int(date_match.group(3)):02d}"
+                else:
+                    date_match_global = re.search(r'(\d{4})[年/\.-](\d{1,2})[月/\.-](\d{1,2})', full_text)
+                    if date_match_global:
+                        draw_date = f"{date_match_global.group(1)}/{int(date_match_global.group(2)):02d}/{int(date_match_global.group(3)):02d}"
+                    else:
+                        draw_date = "不明"
+                
+                # セット球の抽出（A-J）
+                set_match = re.search(r'([A-J])\s*セット|セット\s*球?\s*[:：]?\s*([A-J])|([A-J])セット', table_text, re.IGNORECASE)
+                set_ball = "A"
+                if set_match:
+                    for g in set_match.groups():
+                        if g and len(g) == 1:
+                            set_ball = g.upper()
+                            break
+                else:
+                    set_match_global = re.search(r'([A-J])\s*セット|セット\s*球?\s*[:：]?\s*([A-J])|([A-J])セット', full_text, re.IGNORECASE)
+                    if set_match_global:
+                        for g in set_match_global.groups():
+                            if g and len(g) == 1:
+                                set_ball = g.upper()
+                                break
+                
+                # 当選番号の個数チェック
+                cells = [c.get_text(strip=True) for c in table.find_all(['td', 'th'])]
+                pure_nums = []
+                for c in cells:
+                    if c.isdigit() and 1 <= int(c) <= rule["max"]:
+                        pure_nums.append(int(c))
                 
                 if len(pure_nums) >= total_nums_needed:
-                    tmp_main = sorted(pure_nums[:rule["main"]])
-                    tmp_bonus = pure_nums[rule["main"]:total_nums_needed]
+                    main_part = sorted(pure_nums[:rule["main"]])
+                    bonus_part = pure_nums[rule["main"]:total_nums_needed]
                     
-                    # 本数字に重複がないかチェックして合格なら採用
-                    if len(set(tmp_main)) == rule["main"]:
-                        main_part = tmp_main
-                        bonus_part = tmp_bonus
-                        break
-
-        # 第二段階：表の構造が変わっていた場合、ページ全体の文章からキーワード周辺を直接狙い撃ち
-        if not main_part or not bonus_part:
-            pos = full_text.find(f"第{draw_round}回")
-            search_area = full_text[pos:pos+3000] if pos != -1 else full_text
-            
-            # 「本数字」と「ボーナス」の文字の後ろにある数字を個別にスキャン
-            main_match = re.search(r'(?:本数字|当選番号|抽せん数字|結果)\s*[:：\s]?\s*((?:\s*\b\d{1,2}\b)+)', search_area)
-            bonus_match = re.search(r'(?:ボーナス|bonus|分球|Ｂ|B)\s*[:：\s]?\s*((?:\s*\b\d{1,2}\b)+)', search_area)
-            
-            if main_match and bonus_match:
-                tmp_main = [int(n) for n in re.findall(r'\b\d{1,2}\b', main_match.group(1)) if 1 <= int(n) <= rule["max"]]
-                tmp_bonus = [int(n) for n in re.findall(r'\b\d{1,2}\b', bonus_match.group(1)) if 1 <= int(n) <= rule["max"]]
-                
-                if len(tmp_main) >= rule["main"] and len(tmp_bonus) >= rule["bonus"]:
-                    main_part = sorted(tmp_main[:rule["main"]])
-                    bonus_part = tmp_bonus[:rule["bonus"]]
-            
-            # 最終手段：周辺のすべての数字から該当する個数を順番に強制回収する
-            if not main_part or not bonus_part:
-                all_nums = [int(n) for n in re.findall(r'\b\d{1,2}\b', search_area) if 1 <= int(n) <= rule["max"]]
-                exclude_nums = {draw_round, int(date_match.group(1)), int(date_match.group(2)), int(date_match.group(3))}
-                filtered_nums = []
-                for n in all_nums:
-                    if n not in exclude_nums and n not in filtered_nums:
-                        filtered_nums.append(n)
-                        if len(filtered_nums) == total_nums_needed:
-                            break
-                if len(filtered_nums) == total_nums_needed:
-                    main_part = sorted(filtered_nums[:rule["main"]])
-                    bonus_part = filtered_nums[rule["main"]:total_nums_needed]
-
-        # 最終データの組み立てとバリデーション
-        if main_part and bonus_part and len(main_part) == rule["main"] and len(bonus_part) == rule["bonus"]:
-            result_dict = {
-                "開催回": draw_round,
-                "日付": draw_date,
-                "セット": set_ball
-            }
-            if loto_type == "ロト7":
-                for i, n in enumerate(main_part, 1): result_dict[f"第{i}数字"] = n
-                result_dict["BONUS数字1"] = bonus_part[0]
-                result_dict["BONUS数字2"] = bonus_part[1]
-            elif loto_type == "ロト6":
-                for i, n in enumerate(main_part, 1): result_dict[f"第{i}数字"] = n
-                result_dict["BONUS数字"] = bonus_part[0]
-            else:  # ミニロト
-                for i, n in enumerate(main_part, 1): result_dict[f"第{i}数字"] = n
-                result_dict["BONUS数字"] = bonus_part[0]
-                
-            return result_dict, "成功"
+                    if len(set(main_part)) == rule["main"]:
+                        result_dict = {
+                            "開催回": draw_round,
+                            "日付": draw_date,
+                            "セット": set_ball
+                        }
+                        if loto_type == "ロト7":
+                            for i, n in enumerate(main_part, 1): result_dict[f"第{i}数字"] = n
+                            result_dict["BONUS数字1"] = bonus_part[0]
+                            result_dict["BONUS数字2"] = bonus_part[1]
+                        elif loto_type == "ロト6":
+                            for i, n in enumerate(main_part, 1): result_dict[f"第{i}数字"] = n
+                            result_dict["BONUS数字"] = bonus_part[0]
+                        else:  # ミニロト
+                            for i, n in enumerate(main_part, 1): result_dict[f"第{i}数字"] = n
+                            result_dict["BONUS数字"] = bonus_part[0]
+                            
+                        return result_dict, "成功"
                         
-        return None, "当選番号のテーブル構造およびテキスト構造が正しく解析できませんでした。"
+        return None, "当選番号のテーブル構造が正しく解析できませんでした。"
     except Exception as e:
         return None, f"通信・解析エラー: {str(e)}"
 
@@ -160,12 +137,10 @@ def update_csv_file(loto_type, filename):
             except Exception as csv_err:
                 return df, f"⚠️ 最新回（第 {latest_drawn_info['開催回']} 回）を検出・反映しましたが、CSVへの永続保存に失敗しました: {str(csv_err)}"
         else:
-            # 【変更箇所】最新データがすでにある場合、回数だけでなく抽選日（日付）もメッセージに含める
-            return df, f"ℹ️ CSVデータは最新の状態です（最新の同期回: 第 {current_max_round} 回 / {latest_drawn_info['日付']} 抽選）。"
+            return df, f"ℹ️ CSVデータは最新の状態です（最新の同期回: 第 {current_max_round} 回）。"
     else:
         return df, f"⚠️ 抽選結果の自動同期スキップ: {scrape_msg}（CSVの既存データで分析を継続します）"
 
-# 【独立実行用】パソコンや外部サーバーのCron等で単体実行する場合の処理
 if __name__ == "__main__":
     print("--- ロトCSV自動同期スクリプト手動実行 ---")
     targets = {"ロト7": "loto7_history.csv", "ロト6": "loto6_history.csv", "ミニロト": "miniloto_history.csv"}
