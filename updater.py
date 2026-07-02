@@ -75,17 +75,16 @@ def update_csv_file(loto_type, filename):
             
         full_text = soup.get_text()
         
-        # 🎯【リクエスト通り修正】「〇〇抽選結果速報」というキーワードの直下エリアを特定して切り出し
+        # 「〇〇抽選結果速報」というキーワードの直下エリアを特定して切り出し
         target_kw = current_rule["keyword"]
         start_idx = full_text.find(target_kw)
         if start_idx == -1:
-            # 万が一表記が少しブレていた場合のフォールバック
             start_idx = full_text.find("抽選結果速報")
             
         if start_idx == -1:
             return df, "ℹ️ ページ内から「抽選結果速報」エリアを検出できませんでした。既存データで解析します。"
             
-        # 見出しの下、最大1000文字の範囲（5つのデータが密に詰まっているエリア）をピンポイント抽出
+        # 見出しの下、最大1000文字の範囲をピンポイント抽出
         target_area = full_text[start_idx : start_idx + 1000]
         
         # 3. 5つの重要要素の抽出処理
@@ -95,32 +94,27 @@ def update_csv_file(loto_type, filename):
             return df, "ℹ️ 速報エリアから最新の「抽選回」を特定できませんでした。"
         scraped_round_num = int(round_match.group(1))
         
-        # もしCSVに既に最新回がある場合は更新不要として終了
-        if latest_round_in_csv and scraped_round_num <= latest_round_in_csv:
-            return df, f"🎉 データは最新です (最新の第 {scraped_round_num} 回までCSVに反映済み)。"
-            
-        # ② 抽選日
+        # ② 抽選日（メッセージ表示に使うため、判定順序を上に移動しました）
         date_match = re.search(r'(\d{4}年\d{1,2}月\d{1,2}日|\d{4}/\d{1,2}/\d{1,2})', target_area)
         scraped_date = date_match.group(1) if date_match else "不明"
         
+        # 🎯【変更箇所】すでに最新データがある場合のメッセージに「抽選日」を併記
+        if latest_round_in_csv and scraped_round_num <= latest_round_in_csv:
+            return df, f"🎉 データは最新です (最新の第 {scraped_round_num} 回 [抽選日: {scraped_date}] までCSVに反映済み)。"
+            
         # ③ セット球
         set_match = re.search(r'(?:セット球|セット|球)\s*[:：]?\s*([A-J_a-j])', target_area)
         scraped_set = set_match.group(1).upper() if set_match else "C"
         
         # ④・⑤ 本数字とボーナス数字の全数字候補を順番通りに配列化
-        # 「本数字」「ボーナス数字」周辺にある1〜2桁の数字をまとめてリスト化
         all_numbers = [int(n) for n in re.findall(r'\b\d{1,2}\b', target_area)]
         
-        # 抽選回や日付に使われている数字を除外するため、
-        # 通常ロト数字としてあり得る範囲 (1〜43) にフィルタリング
         valid_pool = []
         for n in all_numbers:
-            # ロト6は最大43、ロト7は最大37、ミニロトは最大31
             max_limit = 43 if loto_type == "ロト6" else (37 if loto_type == "ロト7" else 31)
             if 1 <= n <= max_limit:
                 valid_pool.append(n)
                 
-        # 先頭から「本数字の個数」分を本数字、続く分をボーナス数字としてスライス
         total_needed = current_rule["main_count"] + current_rule["bonus_count"]
         if len(valid_pool) < total_needed:
             return df, f"ℹ️ 速報エリアから十分な個数の本数字・ボーナス数字を分離できませんでした。"
@@ -131,7 +125,7 @@ def update_csv_file(loto_type, filename):
         # 4. 新しい行データの組み立てとCSVへの書き込み
         new_row = {}
         
-        # 抽選回列の設定 (フォーマットをCSVの既存データに合わせる)
+        # 抽選回列の設定
         if round_col:
             sample_val = str(df[round_col].iloc[-1])
             if "第" in sample_val and "回" in sample_val:
@@ -159,7 +153,7 @@ def update_csv_file(loto_type, filename):
             if i < len(scraped_bonuses):
                 new_row[col_name] = scraped_bonuses[i]
                 
-        # 既存のCSVに含まれるその他の全ての列を空文字で初期化(エラー防止)
+        # 既存のCSVに含まれるその他の全ての列を空文字で初期化
         for col in df.columns:
             if col not in new_row:
                 new_row[col] = ""
@@ -169,7 +163,8 @@ def update_csv_file(loto_type, filename):
         df = pd.concat([df, new_df], ignore_index=True)
         df.to_csv(filename, index=False, encoding='utf-8')
         
-        return df, f"🎉 新着データ検知！【第 {scraped_round_num} 回】の抽選結果（セット球: {scraped_set}）を自動取得し、CSVへ追加しました！"
+        # 🎯【変更箇所】新着データ検知時のメッセージに「抽選日」を分かりやすく併記
+        return df, f"🎉 新着データ検知！【第 {scraped_round_num} 回（抽選日: {scraped_date}）】の抽選結果（セット球: {scraped_set}）を自動取得し、CSVへ追加しました！"
         
     except Exception as e:
         return df, f"⚠️ 自動更新中に予期せぬエラーが発生しました: {str(e)}"
