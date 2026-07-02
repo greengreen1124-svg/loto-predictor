@@ -384,7 +384,7 @@ if update_msg:
 # ビアス式データの自動取得（新ロジック）
 bias_nums, debug_info = fetch_bias_numbers_strict(loto_choice)
 
-# 🚨 【新設】サイドバー：緊急手動入力機能（スクレイピングが失敗した時の100%保険）
+# 🚨 サイドバー：緊急手動入力機能（スクレイピングが失敗した時の100%保険）
 st.sidebar.markdown("---")
 st.sidebar.subheader("🚨 救急処置用ツール")
 use_manual_nums = st.sidebar.checkbox("手動でベース数字を入力（上書き）")
