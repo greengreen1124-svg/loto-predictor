@@ -32,7 +32,7 @@ def fetch_bias_numbers_strict(loto_type):
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
             
-            # メニューやサイドバーのノイズを減らすため、不要なタグを一時的にパージ
+            # 不要なタグを一時的にパージ
             for noise in soup(["script", "style", "header", "footer", "nav"]):
                 noise.decompose()
                 
@@ -41,14 +41,13 @@ def fetch_bias_numbers_strict(loto_type):
             
             best_nums = []
             
-            # 🎯 1. 構造的アプローチ：「絞り込み予想」の文字が含まれる要素（見出し等）を特定
+            # 🎯 1. 構造的アプローチ：「絞り込み予想」の見出しを特定
             anchor = soup.find(string=re.compile("絞り込み予想"))
             if anchor:
-                # 見出しの「直後にあるテーブルやデータコンテナ」をピンポイントで取得
                 target_area = anchor.find_next(['table', 'tr', 'div'])
                 if target_area:
                     area_text = target_area.get_text()
-                    # ⚠️ 重要ガード：もし直後のエリアに「削除数字」が含まれていたらその手前で完全に切断
+                    # ⚠️ 削除数字が含まれていたらその手前で完全に切断
                     if "削除数字" in area_text:
                         area_text = area_text.split("削除数字")[0]
                         
@@ -61,7 +60,7 @@ def fetch_bias_numbers_strict(loto_type):
                     if len(valid_nums) >= min_required:
                         best_nums = sorted(valid_nums)
 
-            # 🎯 2. テキストブロック型アプローチ（フォールバック ＆ 削除数字の厳格遮断）
+            # 🎯 2. テキストブロック型アプローチ
             if len(best_nums) < min_required:
                 full_text = soup.get_text()
                 positions = []
@@ -70,8 +69,6 @@ def fetch_bias_numbers_strict(loto_type):
                     
                 for pos in positions:
                     sub_txt = full_text[pos:pos+1200]
-                    
-                    # 🛑 「削除数字」がテキスト内に現れた時点で、それ以降の後続テキストを絶対に拾わない
                     for stop_word in ["削除数字", "削除", "過去のデータ", "バックナンバー", "回号別一覧"]:
                         if stop_word in sub_txt:
                             sub_txt = sub_txt.split(stop_word)[0]
@@ -86,25 +83,11 @@ def fetch_bias_numbers_strict(loto_type):
                         if len(valid_nums) > len(best_nums):
                             best_nums = sorted(valid_nums)
             
-            # 🎯 3. 最終セーフティフォールバック（行単位スキャン：ここでも「削除」の文字がある行は絶対除外）
-            if len(best_nums) < min_required:
-                full_text = soup.get_text()
-                for line in full_text.split('\n'):
-                    line = line.strip()
-                    if any(w in line for w in ["第", "回", "年", "月", "日", "過去", "削除"]): continue
-                    line_nums = [int(x) for x in re.findall(r'\b\d{1,2}\b', line) if 1 <= int(x) <= max_num]
-                    line_nums = list(set(line_nums))
-                    if min_required <= len(line_nums) <= (max_num - 5):
-                        if len(line_nums) > len(best_nums):
-                            best_nums = sorted(line_nums)
-
             if len(best_nums) >= min_required:
                 status_log["numbers_found"] = len(best_nums)
-                status_log["msg"] = "「絞り込み予想」直下エリアからのリアルタイム数字抽出に成功しました（削除数字の混入ガード済）。"
+                status_log["msg"] = "最新の絞り込み予想数字の同期に成功しました。"
                 status_log["success"] = True
                 return best_nums, status_log
-                
-            status_log["msg"] = "有効な絞り込み予想数字エリアの特定、または数字の抽出に失敗しました。"
         else:
             status_log["msg"] = f"アクセス拒否 (HTTP {response.status_code})"
     except Exception as e:
@@ -147,7 +130,6 @@ def predict_next_set_ball_advanced(df):
             
         max_val = max(counts.values())
         min_val = min(counts.values())
-        
         hots = [k for k, v in counts.items() if v == max_val]
         colds = [k for k, v in counts.items() if v == min_val]
         
@@ -179,13 +161,51 @@ def predict_next_set_ball_advanced(df):
                     break
 
     status_msg = f"前回【{last_set}セット】の直後傾向を解析（過去 {current_window} 回まで自動で遡って確定）"
-    if len(hots) > 1 or len(colds) > 1:
-        status_msg += " ※全データを遡っても同数のため、直近の優位性から自動選出"
-
     return hot_set, cold_set, status_msg
 
 
-# --- CSVデータの読み込みと「直近30回」の傾向分析 ---
+# --- 🎯【新設】選択されたセット球固有の過去トレンドを動的に再計算する関数 ---
+def calculate_set_specific_trends(df, loto_type, selected_set, global_trends):
+    if 'セット' not in df.columns or not selected_set or selected_set == "未設定":
+        return global_trends
+        
+    # 選択されたセット球だけのデータを過去データ全体から抽出
+    set_df = df[df['セット'] == selected_set]
+    if set_df.empty:
+        return global_trends
+        
+    # そのセット球が使用された「直近30回分」をターゲットにする
+    recent_set = set_df.tail(30)
+    
+    if loto_type == "ロト7":
+        pick_num = 7
+    elif loto_type == "ロト6":
+        pick_num = 6
+    else:
+        pick_num = 5
+        
+    # セット球特有の出目傾向（癖）を再計算
+    if len(recent_set) >= 3:
+        specific_trends = {
+            "sum_min": int(recent_set['sum_val'].quantile(0.1)) if len(recent_set) >= 10 else int(recent_set['sum_val'].min()),
+            "sum_max": int(recent_set['sum_val'].quantile(0.9)) if len(recent_set) >= 10 else int(recent_set['sum_val'].max()),
+            "sum_avg": int(recent_set['sum_val'].mean()),
+            "odds_mode": int(recent_set['odds_count'].mode()[0] if not recent_set['odds_count'].empty else global_trends["odds_mode"]),
+            "serial_rate": float(recent_set['has_serial'].mean()),
+            "back_avg": float(recent_set['back_count'].mean()),
+            "slide_avg": float(recent_set['slide_count'].mean()),
+            # 開催回情報やAI予測ステータスは全体共通のものを引き継ぐ
+            "last_round": global_trends["last_round"],
+            "last_date": global_trends["last_date"],
+            "hot_set": global_trends["hot_set"],
+            "set_status_msg": global_trends["set_status_msg"],
+            "all_sets": global_trends["all_sets"]
+        }
+        return specific_trends
+    return global_trends
+
+
+# --- CSVデータの読み込みと事前加工 ---
 def load_and_analyze_history(loto_type):
     file_map = {
         "ロト7": "loto7_history.csv",
@@ -200,10 +220,8 @@ def load_and_analyze_history(loto_type):
     try:
         if hasattr(updater, 'update_csv_file'):
             df, update_info_msg = updater.update_csv_file(loto_type, filename)
-        else:
-            update_info_msg = "ℹ️ updater.pyにupdate_csv_file関数が見つかりません。直接読み込みを開始します。"
     except Exception as e:
-        update_info_msg = f"⚠️ 自動更新プロセスで制限が発生しました（既存データで解析します）: {str(e)}"
+        update_info_msg = f"⚠️ 自動更新プロセス制限: {str(e)}"
     
     if df is None:
         if os.path.exists(filename):
@@ -213,12 +231,12 @@ def load_and_analyze_history(loto_type):
                 try:
                     df = pd.read_csv(filename, encoding='shift_jis')
                 except Exception as e:
-                    return None, None, f"❌ CSVファイルの読み込みに失敗しました（文字コードエラー）: {str(e)}", update_info_msg
+                    return None, None, None, f"❌ CSV読み込みエラー: {str(e)}", update_info_msg
         else:
-            return None, None, f"❌ CSVファイル「{filename}」がルートディレクトリに見つかりません。", update_info_msg
+            return None, None, None, f"❌ CSV「{filename}」が見つかりません。", update_info_msg
 
     if df is None or df.empty:
-        return None, None, f"❌ {filename} のデータが空、または正しく読み込めませんでした。", update_info_msg
+        return None, None, None, f"❌ データが空です。", update_info_msg
         
     if loto_type == "ロト7":
         main_cols = [f"第{i}数字" for i in range(1, 8)]
@@ -228,7 +246,7 @@ def load_and_analyze_history(loto_type):
         main_cols = [f"第{i}数字" for i in range(1, 6)]
         
     if not all(col in df.columns for col in main_cols):
-        return None, None, f"❌ CSV内に解析に必要なターゲット列名（第1数字など）が見つかりません。", update_info_msg
+        return None, None, None, f"❌ 解析に必要な列名がCSV内にありません。", update_info_msg
         
     def clean_row(row):
         return sorted([int(float(i)) for i in row if pd.notna(i) and str(i).strip() != ''])
@@ -261,12 +279,10 @@ def load_and_analyze_history(loto_type):
     
     recent_30 = df.tail(30)
     set_counts = recent_30['セット'].value_counts().to_dict() if 'セット' in df.columns else {"未設定": 1}
-    
     last_row = df.iloc[-1]
     
     hot_set, cold_set, set_status_msg = predict_next_set_ball_advanced(df)
     
-    # 選択肢として提示する、CSV内に存在する一意なセット球のリストを取得
     all_existing_sets = []
     if 'セット' in df.columns:
         all_existing_sets = sorted([str(s).strip() for s in df['セット'].dropna().unique() if str(s).strip() != "" and s != "未設定"])
@@ -285,13 +301,12 @@ def load_and_analyze_history(loto_type):
         "last_round": last_row['開催回'] if '開催回' in last_row else '不明',
         "last_date": last_row['日付'] if '日付' in last_row else '不明',
         "hot_set": hot_set,
-        "cold_set": cold_set,
         "set_status_msg": set_status_msg,
-        "all_sets": all_existing_sets  # 選択UI用に引き渡し
+        "all_sets": all_existing_sets
     }
     
     last_drawn = df['numbers_list'].iloc[-1]
-    return analysis, last_drawn, None, update_info_msg
+    return df, analysis, last_drawn, None, update_info_msg
 
 
 # --- トレンドフィルター型・予想ロジック ---
@@ -350,32 +365,63 @@ def generate_advanced_prediction(bias_numbers, loto_type, trend_analysis, last_n
 
 
 # --- Streamlit UI 構築 ---
-st.title("🎰 ロト・スマートAI予想システム（過去トレンド完全連動型）")
+st.title("🎰 ロト・スマートAI予想システム（セット球完全連動型）")
 
 # サイドバー
 st.sidebar.header("⚙️ 条件設定")
 loto_choice = st.sidebar.selectbox("くじの種類を選択", ["ロト7", "ロト6", "ミニロト"])
 prediction_rows = st.sidebar.slider("予想する組み合わせ数", 1, 10, 5)
 
-# 過去データ解析と自動更新の実行
-trends, last_drawn_nums, error_msg, update_msg = load_and_analyze_history(loto_choice)
+# 過去データ解析と自動更新の実行 (引数に df を追加して受け取る)
+df, trends, last_drawn_nums, error_msg, update_msg = load_and_analyze_history(loto_choice)
 
 if error_msg:
     st.error(error_msg)
     st.stop()
 
 if update_msg:
-    if "🎉" in update_msg:
-        st.success(update_msg)
-    elif "ℹ️" in update_msg:
-        st.info(update_msg)
-    else:
-        st.warning(update_msg)
+    if "🎉" in update_msg: st.success(update_msg)
+    elif "ℹ️" in update_msg: st.info(update_msg)
+    else: st.warning(update_msg)
 
 col1, col2 = st.columns([1, 1])
 
+# 🛠️ 先に右側の col2 を処理して、選択されたセット球を取得する
+with col2:
+    st.subheader("🔮 次回セット球の予測・選択")
+    selected_set = "未設定"
+    if trends:
+        hot_set = trends.get('hot_set', 'データなし')
+        status_msg = trends.get('set_status_msg', '')
+        available_sets = trends.get('all_sets', ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J'])
+        
+        if hot_set != "データなし":
+            st.caption("💡 【AI解析ステータス】")
+            st.info(status_msg)
+            
+            try:
+                default_idx = available_sets.index(str(hot_set).strip())
+            except ValueError:
+                default_idx = 0
+            
+            # ドロップダウン（大穴は削除済。AI予測値が初期セットされるが手動選択も自由）
+            selected_set = st.selectbox(
+                "🔥 ターゲットセット球（切り替えると、左側のフィルター傾向値と最終予想がそのセット球専用に変化します）",
+                options=available_sets,
+                index=default_idx
+            )
+        else:
+            st.warning("セット球データがCSVに存在しないか、解析できませんでした。")
+    else:
+        st.warning("データ不足のため予測をスキップします。")
+
+# ⚡【最重要連動】選択されたセット球に基づいて、傾向分析（trends）の数値を動的に書き換える！
+if trends and df is not None:
+    trends = calculate_set_specific_trends(df, loto_choice, selected_set, trends)
+
+# 🛠️ 書き換えられた trends（セット球固有データ）を使って左側の表を表示
 with col1:
-    st.subheader(f"📊 直近30回の傾向分析 ({loto_choice})")
+    st.subheader(f"📊 【{selected_set} セット】限定の傾向分析 ({loto_choice})")
     if trends:
         trend_df = pd.DataFrame({
             "分析項目": ["① 合計数の出現範囲", "① 合計数の平均値", "② 最も多い奇数個数", "③ 連番の発生確率", "④ 平均ひっぱり個数", "⑤ 平均スライド個数"],
@@ -391,40 +437,12 @@ with col1:
         st.table(trend_df)
     else:
         st.warning("傾向データが算出できませんでした。")
-    
-with col2:
-    st.subheader("🔮 次回セット球の予測")
-    if trends:
-        hot_set = trends.get('hot_set', 'データなし')
-        status_msg = trends.get('set_status_msg', '')
-        available_sets = trends.get('all_sets', ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J'])
-        
-        if hot_set != "データなし":
-            st.caption("💡 【AI解析ステータス】")
-            st.info(status_msg)
-            
-            # AIが予測した相性セット球を初期選択状態(インデックス)にする
-            try:
-                default_idx = available_sets.index(str(hot_set).strip())
-            except ValueError:
-                default_idx = 0
-            
-            # 大穴を削除し、本命をドロップダウンで手動変更・選択可能なUIに変更
-            selected_set = st.selectbox(
-                "🔥 本命相性球（AI予測値が初期セットされています。手動選択も可能です）",
-                options=available_sets,
-                index=default_idx
-            )
-        else:
-            st.warning("セット球データがCSVに存在しないか、解析できませんでした。")
-    else:
-        st.warning("データ不足のため予測をスキップします。")
 
 # ビアス式データの厳格取得
 bias_nums, debug_info = fetch_bias_numbers_strict(loto_choice)
 
 st.markdown("---")
-st.subheader(f"🎯 ビアス式数字 × 直近30回フィルター 最終予想")
+st.subheader(f"🎯 ビアス式数字 × 【{selected_set}セット傾向フィルター】 最終予想")
 
 if debug_info["success"] and bias_nums is not None and trends:
     st.success(f"✅ 【通信成功】創楽のWebサイトから最新のベース数字の同期に成功しました。")
@@ -435,10 +453,11 @@ if debug_info["success"] and bias_nums is not None and trends:
     st.write(f"**前回（最新）の本数字出目:** 🏆 **第 {trends['last_round']} 回** （{trends['last_date']} 抽選）")
     st.code("  ".join([f"{num:02d}" for num in sorted(last_drawn_nums)]))
 
-    if st.button(f"🔮 上記の傾向をすべて満たす組み合わせを抽出する", type="primary"):
+    # 🚀 ここに渡される trends がセット球固有の数値になっているため、予想ロジックが100%連動します
+    if st.button(f"🔮 【{selected_set}セット】の出目傾向をすべて満たす組み合わせを抽出する", type="primary"):
         results = generate_advanced_prediction(bias_nums, loto_choice, trends, last_drawn_nums, prediction_rows)
         
-        st.markdown("### 🏹 厳選された予想パターン")
+        st.markdown(f"### 🏹 厳選された予想パターン（{selected_set}セット専用）")
         for i, res in enumerate(results, 1):
             balls = "  ".join([f"`{num:02d}`" for num in res])
             res_sum = sum(res)
@@ -447,7 +466,4 @@ if debug_info["success"] and bias_nums is not None and trends:
             
             st.markdown(f"**パターン {i:02d}** : {balls} *(合計: {res_sum} / 奇偶比: {res_odds}:{res_even})*")
 else:
-    st.error("❌ 取得失敗：創楽のWebサイトから最新の絞り込み数字をスクレイピングできませんでした。")
-    with st.expander("🔍 詳しい通信エラーの原因（デバッグ情報）"):
-        st.write(f"**ステータスコード:** {debug_info['status_code']}")
-        st.write(f"**エラー詳細:** {debug_info['msg']}")
+    st.error("❌ 取得失敗：スクレイピングが正常に機能していません。")
