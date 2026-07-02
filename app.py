@@ -13,7 +13,7 @@ import updater
 # ページの設定
 st.set_page_config(page_title="ロトデータ分析＆AI予想", page_icon="🎰", layout="wide")
 
-# --- スクレイピング関数（確実に成功していた http:// 通信へ修正・復元） ---
+# --- スクレイピング関数（「ビアス式 絞り込み予想」の直下をピンポイントで狙い撃つよう改良） ---
 def fetch_bias_numbers_strict(loto_type):
     urls = {
         "ロト7": "http://sougaku.com/loto7/index.html",
@@ -33,6 +33,7 @@ def fetch_bias_numbers_strict(loto_type):
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
             
+            # 不要なノイズタグを除去してテキスト化
             for noise in soup(["script", "style", "header", "footer", "nav"]):
                 noise.decompose()
                 
@@ -41,7 +42,8 @@ def fetch_bias_numbers_strict(loto_type):
             min_required = 5 if loto_type == "ミニロト" else (6 if loto_type == "ロト6" else 7)
             max_num = 31 if loto_type == "ミニロト" else (43 if loto_type == "ロト6" else 37)
             
-            keywords = ["絞り込み予想", "予想数字", "今回の予想", "厳選予想", "データ分析予想"]
+            # 🎯【修正箇所】メニューの誤検知を防ぐため、画像にある「ビアス式」を最優先キーワードに設定
+            keywords = ["ビアス式 絞り込み予想", "ビアス式", "絞り込み予想", "予想数字"]
             start_pos = -1
             for kw in keywords:
                 idx = full_text.find(kw)
@@ -54,6 +56,7 @@ def fetch_bias_numbers_strict(loto_type):
                 
             target_area = full_text[start_pos:]
             
+            # 過去のデータ一覧が始まる手前で切断
             stop_words = ["過去のデータ", "バックナンバー", "回号別一覧", "過去当選番号", "過去の出目"]
             end_pos = len(target_area)
             for sw in stop_words:
@@ -63,12 +66,18 @@ def fetch_bias_numbers_strict(loto_type):
                     
             target_area = target_area[:end_pos]
             
+            # 🎯【さらに安全対策】見出し直下の純粋な予想数字エリア（最大600文字）に限定し、後続のノイズ数字混入を完全にシャットアウト
+            if len(target_area) > 600:
+                target_area = target_area[:600]
+            
+            # 純粋な数字のみを抽出
             extracted = [int(x) for x in re.findall(r'\b\d{1,2}\b', target_area)]
             bias_nums = []
             for n in extracted:
                 if 1 <= n <= max_num and n not in bias_nums:
                     bias_nums.append(n)
             
+            # セーフティフォールバック（切り出しが万が一空になった場合の保険）
             if len(bias_nums) < min_required:
                 fallback_extracted = [int(x) for x in re.findall(r'\b\d{1,2}\b', full_text[:2500])]
                 bias_nums = []
@@ -353,7 +362,7 @@ if update_msg:
     elif "ℹ️" in update_msg: st.info(update_msg)
     else: st.warning(update_msg)
 
-# ビアス式データの自動取得（http通信）
+# ビアス式データの自動取得（改良版：http通信＆「ビアス式」優先追跡）
 bias_nums, debug_info = fetch_bias_numbers_strict(loto_choice)
 
 # 🚨 サイドバー：緊急手動入力機能
@@ -465,4 +474,4 @@ else:
         st.write(f"**ステータスコード:** {debug_info['status_code']}")
         st.write(f"**エラー詳細:** {debug_info['msg']}")
         st.markdown("---")
-        st.markdown("💡 **【解決策】** 相手サイトのサーバー障害や、通信環境により自動同期ができない状態です。サイドバーの「**手動でベース数字を入力（上書き）**」にチェックを入れ、サイト上の数字を入力することで**エラーを即時解消し、AI予想機能をそのままフル活用**できます。")
+        st.markdown("💡 **【解決策】** 相手サイトのサーバー障害や、通信環境により自動同期ができない状態です。サイドバーの「**手動でベース数字を入力（上書き）**」にチェックを入れ, サイト上の数字を入力することで**エラーを即時解消し、AI予想機能をそのままフル活用**できます。")
