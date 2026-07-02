@@ -13,12 +13,13 @@ import updater
 # ページの設定
 st.set_page_config(page_title="ロトデータ分析＆AI予想", page_icon="🎰", layout="wide")
 
-# --- スクレイピング関数（通信エラー回避・ブロック一括切り出し方式） ---
+# --- スクレイピング関数（確実に成功していた http:// 通信へ修正・復元） ---
 def fetch_bias_numbers_strict(loto_type):
+    # 🎯 スクレイピングが成功していた本来の http:// URLに差し戻し
     urls = {
-        "ロト7": "https://sougaku.com/loto7/index.html",
-        "ロト6": "https://sougaku.com/loto6/index.html",
-        "ミニロト": "https://sougaku.com/miniloto/index.html"
+        "ロト7": "http://sougaku.com/loto7/index.html",
+        "ロト6": "http://sougaku.com/loto6/index.html",
+        "ミニロト": "http://sougaku.com/miniloto/index.html"
     }
     url = urls[loto_type]
     headers = {
@@ -26,16 +27,15 @@ def fetch_bias_numbers_strict(loto_type):
     }
     status_log = {"status_code": None, "numbers_found": 0, "msg": "未接続", "success": False}
     try:
-        import urllib3
-        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-        
-        response = requests.get(url, headers=headers, timeout=10, verify=False)
+        # http通信で確実にページデータを取得
+        response = requests.get(url, headers=headers, timeout=10)
         status_log["status_code"] = response.status_code
         response.encoding = response.apparent_encoding
         
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
             
+            # 不要なノイズタグを除去してテキスト化
             for noise in soup(["script", "style", "header", "footer", "nav"]):
                 noise.decompose()
                 
@@ -44,6 +44,7 @@ def fetch_bias_numbers_strict(loto_type):
             min_required = 5 if loto_type == "ミニロト" else (6 if loto_type == "ロト6" else 7)
             max_num = 31 if loto_type == "ミニロト" else (43 if loto_type == "ロト6" else 37)
             
+            # 予想数字が掲載されているコンテンツブロックを切り出し
             keywords = ["絞り込み予想", "予想数字", "今回の予想", "厳選予想", "データ分析予想"]
             start_pos = -1
             for kw in keywords:
@@ -66,12 +67,14 @@ def fetch_bias_numbers_strict(loto_type):
                     
             target_area = target_area[:end_pos]
             
+            # 純粋な数字のみを抽出
             extracted = [int(x) for x in re.findall(r'\b\d{1,2}\b', target_area)]
             bias_nums = []
             for n in extracted:
                 if 1 <= n <= max_num and n not in bias_nums:
                     bias_nums.append(n)
             
+            # セーフティフォールバック（切り出しが厳しすぎた場合は最上部から強制回収）
             if len(bias_nums) < min_required:
                 fallback_extracted = [int(x) for x in re.findall(r'\b\d{1,2}\b', full_text[:2500])]
                 bias_nums = []
@@ -162,7 +165,7 @@ def calculate_set_specific_trends(df, loto_type, selected_set, global_trends):
         
     recent_set = set_df.tail(30) # そのセット球が使用された「直近30回分」を抽出
     
-    # 🔥 【新機能】該当セット球の過去全データから出現回数が多い数字TOP10を集計
+    # 該当セット球の過去全データから出現回数が多い数字TOP10を集計
     all_nums = [num for nums_list in set_df['numbers_list'] for num in nums_list]
     top_nums = [item[0] for item in Counter(all_nums).most_common(10)] if all_nums else []
     
@@ -181,7 +184,7 @@ def calculate_set_specific_trends(df, loto_type, selected_set, global_trends):
             "cold_set": global_trends["cold_set"],
             "set_status_msg": global_trends["set_status_msg"],
             "all_sets": global_trends["all_sets"],
-            "top_numbers": top_nums  # 辞書に格納
+            "top_numbers": top_nums
         }
         return specific_trends
     return global_trends
@@ -368,7 +371,7 @@ if update_msg:
     elif "ℹ️" in update_msg: st.info(update_msg)
     else: st.warning(update_msg)
 
-# ビアス式データの自動取得
+# ビアス式データの自動取得（修正版：http通信）
 bias_nums, debug_info = fetch_bias_numbers_strict(loto_choice)
 
 # 🚨 サイドバー：緊急手動入力機能
@@ -424,7 +427,7 @@ with col2:
 if trends and df is not None:
     trends = calculate_set_specific_trends(df, loto_choice, selected_set, trends)
 
-# 🛠️ 右側に【新機能】出やすい数字を表示
+# 🛠️ 右側に「大穴項目」を排除し、「出やすい数字TOP10」のみをスマートに表示
 with col2:
     if trends and "top_numbers" in trends and trends["top_numbers"]:
         st.markdown(f"### 📈 【{selected_set}セット】で出やすい数字 TOP10")
