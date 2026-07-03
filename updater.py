@@ -13,9 +13,24 @@ import updater
 # ページの設定
 st.set_page_config(page_title="ロトデータ分析＆AI予想", page_icon="🎰", layout="wide")
 
-# --- スクレイピング関数（「ビアス式 絞り込み予想」直下をピンポイント狙い撃ちに改良） ---
+# --- 安全な型変換用ヘルパー関数 ---
+def safe_int(val, default=0):
+    try:
+        if pd.isna(val): return default
+        return int(float(val))
+    except:
+        return default
+
+def safe_float(val, default=0.0):
+    try:
+        if pd.isna(val): return default
+        return float(val)
+    except:
+        return default
+
+
+# --- スクレイピング関数（「ビアス式 絞り込み予想」直下をピンポイントかつ確実に狙い撃ち） ---
 def fetch_bias_numbers_strict(loto_type):
-    # 🎯 スクレイピング対象のURL
     urls = {
         "ロト7": "http://sougaku.com/loto7/index.html",
         "ロト6": "http://sougaku.com/loto6/index.html",
@@ -27,7 +42,6 @@ def fetch_bias_numbers_strict(loto_type):
     }
     status_log = {"status_code": None, "numbers_found": 0, "msg": "未接続", "success": False}
     try:
-        # http通信で確実にページデータを取得
         response = requests.get(url, headers=headers, timeout=10)
         status_log["status_code"] = response.status_code
         response.encoding = response.apparent_encoding
@@ -44,7 +58,7 @@ def fetch_bias_numbers_strict(loto_type):
             min_required = 5 if loto_type == "ミニロト" else (6 if loto_type == "ロト6" else 7)
             max_num = 31 if loto_type == "ミニロト" else (43 if loto_type == "ロト6" else 37)
             
-            # 🎯【改良点】最優先で「ビアス式」の文言を探すようにキーワードを強化
+            # 最優先で「ビアス式」の文言を探す
             keywords = ["ビアス式　絞り込み予想", "ビアス式絞り込み予想", "絞り込み予想", "予想数字", "今回の予想"]
             start_pos = -1
             for kw in keywords:
@@ -56,8 +70,8 @@ def fetch_bias_numbers_strict(loto_type):
             if start_pos == -1:
                 start_pos = 0
                 
-            # 🎯【改良点】キーワードの「直下」だけを見るため、最大800文字に制限（ノイズ混入を防止）
-            target_area = full_text[start_pos : start_pos + 800]
+            # 🎯【改良】エリア全体のテーブル構造を確実に巻き込むため、最大3000文字に拡大
+            target_area = full_text[start_pos : start_pos + 3000]
             
             stop_words = ["過去のデータ", "バックナンバー", "回号別一覧", "過去当選番号"]
             end_pos = len(target_area)
@@ -75,9 +89,9 @@ def fetch_bias_numbers_strict(loto_type):
                 if 1 <= n <= max_num and n not in bias_nums:
                     bias_nums.append(n)
             
-            # セーフティフォールバック（切り出し範囲が狭すぎて数字が足りない場合は少し広げて回収）
+            # セーフティフォールバック（足りない場合は最上部から広域回収）
             if len(bias_nums) < min_required:
-                fallback_extracted = [int(x) for x in re.findall(r'\b\d{1,2}\b', full_text[start_pos : start_pos + 2500])]
+                fallback_extracted = [int(x) for x in re.findall(r'\b\d{1,2}\b', full_text[start_pos : start_pos + 4000])]
                 bias_nums = []
                 for n in fallback_extracted:
                     if 1 <= n <= max_num and n not in bias_nums:
@@ -98,11 +112,11 @@ def fetch_bias_numbers_strict(loto_type):
 
 
 # --- 相性遷移予測関数 ---
-def predict_next_set_ball_advanced(df):
-    if 'セット' not in df.columns or len(df) < 2:
+def predict_next_set_ball_advanced(df, set_col):
+    if not set_col or set_col not in df.columns or len(df) < 2:
         return "データなし", "ー", "データ不足のため分析できません"
         
-    last_set = df['セット'].iloc[-1]
+    last_set = df[set_col].iloc[-1]
     if pd.isna(last_set) or last_set == "未設定" or str(last_set).strip() == "":
         return "データなし", "ー", "前回のセット球データが未設定です"
 
@@ -116,8 +130,8 @@ def predict_next_set_ball_advanced(df):
         
         transitions = []
         for i in range(len(sub_df) - 1):
-            if sub_df['セット'].iloc[i] == last_set:
-                next_val = sub_df['セット'].iloc[i+1]
+            if sub_df[set_col].iloc[i] == last_set:
+                next_val = sub_df[set_col].iloc[i+1]
                 if pd.notna(next_val) and str(next_val).strip() != "" and next_val != "未設定":
                     transitions.append(next_val)
                     
@@ -155,43 +169,44 @@ def predict_next_set_ball_advanced(df):
     return hot_set, cold_set, status_msg
 
 
-# --- 🎯【セット球完全連動】選択されたセット球固有の過去トレンド＆出やすい数字を動的に再計算する関数 ---
+# --- 🎯【セット球完全連動】動的再計算関数 ---
 def calculate_set_specific_trends(df, loto_type, selected_set, global_trends):
-    if 'セット' not in df.columns or not selected_set or selected_set == "未設定":
+    set_col = global_trends.get("set_col_name")
+    if not set_col or set_col not in df.columns or not selected_set or selected_set == "未設定":
         return global_trends
         
-    set_df = df[df['セット'] == selected_set]
+    set_df = df[df[set_col] == selected_set]
     if set_df.empty:
         return global_trends
         
-    recent_set = set_df.tail(30) # そのセット球が使用された「直近30回分」を抽出
+    recent_set = set_df.tail(30)
     
-    # 該当セット球の過去全データから出現回数が多い数字TOP10を集計
     all_nums = [num for nums_list in set_df['numbers_list'] for num in nums_list]
     top_nums = [item[0] for item in Counter(all_nums).most_common(10)] if all_nums else []
     
     if len(recent_set) >= 3:
         specific_trends = {
-            "sum_min": int(recent_set['sum_val'].quantile(0.1)) if len(recent_set) >= 10 else int(recent_set['sum_val'].min()),
-            "sum_max": int(recent_set['sum_val'].quantile(0.9)) if len(recent_set) >= 10 else int(recent_set['sum_val'].max()),
-            "sum_avg": int(recent_set['sum_val'].mean()),
-            "odds_mode": int(recent_set['odds_count'].mode()[0] if not recent_set['odds_count'].empty else global_trends["odds_mode"]),
-            "serial_rate": float(recent_set['has_serial'].mean()),
-            "back_avg": float(recent_set['back_count'].mean()),
-            "slide_avg": float(recent_set['slide_count'].mean()),
+            "sum_min": safe_int(recent_set['sum_val'].quantile(0.1)) if len(recent_set) >= 10 else safe_int(recent_set['sum_val'].min()),
+            "sum_max": safe_int(recent_set['sum_val'].quantile(0.9)) if len(recent_set) >= 10 else safe_int(recent_set['sum_val'].max()),
+            "sum_avg": safe_int(recent_set['sum_val'].mean()),
+            "odds_mode": safe_int(recent_set['odds_count'].mode()[0] if not recent_set['odds_count'].empty else global_trends["odds_mode"]),
+            "serial_rate": safe_float(recent_set['has_serial'].mean()),
+            "back_avg": safe_float(recent_set['back_count'].mean()),
+            "slide_avg": safe_float(recent_set['slide_count'].mean()),
             "last_round": global_trends["last_round"],
             "last_date": global_trends["last_date"],
             "hot_set": global_trends["hot_set"],
             "cold_set": global_trends["cold_set"],
             "set_status_msg": global_trends["set_status_msg"],
             "all_sets": global_trends["all_sets"],
-            "top_numbers": top_nums
+            "top_numbers": top_nums,
+            "set_col_name": set_col
         }
         return specific_trends
     return global_trends
 
 
-# --- CSVデータの読み込みと事前加工 ---
+# --- CSVデータの読み込みと事前加工（表記揺れ＆クラッシュ対策を大幅強化） ---
 def load_and_analyze_history(loto_type):
     file_map = {
         "ロト7": "loto7_history.csv",
@@ -211,90 +226,118 @@ def load_and_analyze_history(loto_type):
     
     if df is None:
         if os.path.exists(filename):
-            try:
-                df = pd.read_csv(filename, encoding='utf-8')
-            except Exception:
+            for encoding in ['utf-8', 'shift_jis', 'cp932']:
                 try:
-                    df = pd.read_csv(filename, encoding='shift_jis')
-                except Exception as e:
-                    return None, None, None, f"❌ CSV読み込みエラー: {str(e)}", update_info_msg
+                    df = pd.read_csv(filename, encoding=encoding)
+                    break
+                except Exception:
+                    continue
         else:
             return None, None, None, f"❌ CSV「{filename}」が見つかりません。", update_info_msg
 
     if df is None or df.empty:
         return None, None, None, f"❌ データが空です。", update_info_msg
         
-    if loto_type == "ロト7":
-        main_cols = [f"第{i}数字" for i in range(1, 8)]
-    elif loto_type == "ロト6":
-        main_cols = [f"第{i}数字" for i in range(1, 7)]
-    else:
-        main_cols = [f"第{i}数字" for i in range(1, 6)]
+    try:
+        # 🎯【強化】列名のクレンジングと、天ノ極仕様の動的列名判定
+        df.columns = [str(c).strip() for c in df.columns]
+        round_col = next((c for c in df.columns if any(k in c for k in ['回', 'round', 'Round', 'No.', '番号', '開催'])), None)
+        date_col = next((c for c in df.columns if any(k in c for k in ['日', 'date', 'Date', '付'])), None)
+        set_col = next((c for c in df.columns if any(k in c for k in ['セット', 'set', 'Set', '球'])), None)
         
-    if not all(col in df.columns for col in main_cols):
-        return None, None, None, f"❌ 解析に必要な列名がCSV内にありません。", update_info_msg
+        # 本数字列の特定
+        main_cols = [c for c in df.columns if '第' in c and '数字' in c and 'ボーナス' not in c]
+        if not main_cols:
+            main_cols = [c for c in df.columns if re.search(r'(?:num|数字|本数字)\s*\d+', c, re.I)]
+            
+        min_required = 7 if loto_type == "ロト7" else (6 if loto_type == "ロト6" else 5)
+        if len(main_cols) < min_required:
+            return None, None, None, f"❌ 解析に必要な本数字の列名がCSV内に見つかりません。", update_info_msg
+            
+        # 🎯【強化】ゴミデータ混入でも絶対に落ちない超クレンジング関数
+        def clean_row(row):
+            valid_nums = []
+            for i in row:
+                if pd.notna(i):
+                    s = str(i).strip()
+                    match = re.search(r'\d+', s)
+                    if match:
+                        try:
+                            valid_nums.append(int(match.group()))
+                        except ValueError:
+                            pass
+            return sorted(valid_nums)
+            
+        df['numbers_list'] = df[main_cols].values.tolist()
+        df['numbers_list'] = df['numbers_list'].apply(clean_row)
         
-    def clean_row(row):
-        return sorted([int(float(i)) for i in row if pd.notna(i) and str(i).strip() != ''])
+        df['sum_val'] = df['numbers_list'].apply(sum)
+        df['odds_count'] = df['numbers_list'].apply(lambda x: len([i for i in x if i % 2 != 0]))
+        df['has_serial'] = df['numbers_list'].apply(lambda x: any(x[i+1] - x[i] == 1 for i in range(len(x)-1)) if len(x) > 1 else False)
+        df['prev_numbers'] = df['numbers_list'].shift(1)
         
-    df['numbers_list'] = df[main_cols].values.tolist()
-    df['numbers_list'] = df['numbers_list'].apply(clean_row)
-    
-    df['sum_val'] = df['numbers_list'].apply(sum)
-    df['odds_count'] = df['numbers_list'].apply(lambda x: len([i for i in x if i % 2 != 0]))
-    df['has_serial'] = df['numbers_list'].apply(lambda x: any(x[i+1] - x[i] == 1 for i in range(len(x)-1)))
-    df['prev_numbers'] = df['numbers_list'].shift(1)
-    
-    def calc_back(row):
-        if not isinstance(row['prev_numbers'], list): return 0
-        return len(set(row['numbers_list']) & set(row['prev_numbers']))
+        def calc_back(row):
+            if not isinstance(row['prev_numbers'], list) or not isinstance(row['numbers_list'], list): return 0
+            return len(set(row['numbers_list']) & set(row['prev_numbers']))
+            
+        def calc_slide(row):
+            if not isinstance(row['prev_numbers'], list) or not isinstance(row['numbers_list'], list): return 0
+            prev_set = set(row['prev_numbers'])
+            current_set = set(row['numbers_list'])
+            slide_candidates = set()
+            for x in prev_set:
+                slide_candidates.add(x - 1)
+                slide_candidates.add(x + 1)
+            slide_candidates = slide_candidates - prev_set
+            return len(current_set & slide_candidates)
+            
+        df['back_count'] = df.apply(calc_back, axis=1)
+        df['slide_count'] = df.apply(calc_slide, axis=1)
         
-    def calc_slide(row):
-        if not isinstance(row['prev_numbers'], list): return 0
-        prev_set = set(row['prev_numbers'])
-        current_set = set(row['numbers_list'])
-        slide_candidates = set()
-        for x in prev_set:
-            slide_candidates.add(x - 1)
-            slide_candidates.add(x + 1)
-        slide_candidates = slide_candidates - prev_set
-        return len(current_set & slide_candidates)
+        recent_30 = df.tail(30)
+        set_counts = recent_30[set_col].value_counts().to_dict() if set_col and set_col in df.columns else {"未設定": 1}
+        last_row = df.iloc[-1]
         
-    df['back_count'] = df.apply(calc_back, axis=1)
-    df['slide_count'] = df.apply(calc_slide, axis=1)
-    
-    recent_30 = df.tail(30)
-    set_counts = recent_30['セット'].value_counts().to_dict() if 'セット' in df.columns else {"未設定": 1}
-    last_row = df.iloc[-1]
-    
-    hot_set, cold_set, set_status_msg = predict_next_set_ball_advanced(df)
-    
-    all_existing_sets = []
-    if 'セット' in df.columns:
-        all_existing_sets = sorted([str(s).strip() for s in df['セット'].dropna().unique() if str(s).strip() != "" and s != "未設定"])
-    if not all_existing_sets:
-        all_existing_sets = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J']
-    
-    analysis = {
-        "sum_min": int(recent_30['sum_val'].quantile(0.1)) if len(recent_30) > 0 else 10,
-        "sum_max": int(recent_30['sum_val'].quantile(0.9)) if len(recent_30) > 0 else 200,
-        "sum_avg": int(recent_30['sum_val'].mean()) if len(recent_30) > 0 else 100,
-        "odds_mode": int(recent_30['odds_count'].mode()[0] if not recent_30['odds_count'].empty else len(main_cols)/2),
-        "serial_rate": float(recent_30['has_serial'].mean()) if len(recent_30) > 0 else 0.5,
-        "back_avg": float(recent_30['back_count'].mean()) if len(recent_30) > 0 else 1.0,
-        "slide_avg": float(recent_30['slide_count'].mean()) if len(recent_30) > 0 else 1.0,
-        "set_ball_counts": set_counts,
-        "last_round": last_row['開催回'] if '開催回' in last_row else '不明',
-        "last_date": last_row['日付'] if '日付' in last_row else '不明',
-        "hot_set": hot_set,
-        "cold_set": cold_set,
-        "set_status_msg": set_status_msg,
-        "all_sets": all_existing_sets,
-        "top_numbers": []
-    }
-    
-    last_drawn = df['numbers_list'].iloc[-1]
-    return df, analysis, last_drawn, None, update_info_msg
+        hot_set, cold_set, set_status_msg = predict_next_set_ball_advanced(df, set_col)
+        
+        all_existing_sets = []
+        if set_col and set_col in df.columns:
+            all_existing_sets = sorted([str(s).strip() for s in df[set_col].dropna().unique() if str(s).strip() != "" and s != "未設定"])
+        if not all_existing_sets:
+            all_existing_sets = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J']
+            
+        # 表記揺れ調整して開催回を取得
+        raw_round = last_row[round_col] if round_col else '不明'
+        raw_date = last_row[date_col] if date_col else '不明'
+        r_str = str(raw_round).strip()
+        last_round_display = r_str.replace("第", "").replace("回", "") if not r_str.isdigit() else r_str
+        
+        # 🎯【強化】int変換エラーを完全に無効化する防御的マッピング
+        analysis = {
+            "sum_min": safe_int(recent_30['sum_val'].quantile(0.1)) if len(recent_30) > 0 else 10,
+            "sum_max": safe_int(recent_30['sum_val'].quantile(0.9)) if len(recent_30) > 0 else 200,
+            "sum_avg": safe_int(recent_30['sum_val'].mean()) if len(recent_30) > 0 else 100,
+            "odds_mode": safe_int(recent_30['odds_count'].mode()[0] if not recent_30['odds_count'].empty else (len(main_cols)/2)),
+            "serial_rate": safe_float(recent_30['has_serial'].mean()) if len(recent_30) > 0 else 0.5,
+            "back_avg": safe_float(recent_30['back_count'].mean()) if len(recent_30) > 0 else 1.0,
+            "slide_avg": safe_float(recent_30['slide_count'].mean()) if len(recent_30) > 0 else 1.0,
+            "set_ball_counts": set_counts,
+            "last_round": last_round_display,
+            "last_date": str(raw_date).strip(),
+            "hot_set": hot_set,
+            "cold_set": cold_set,
+            "set_status_msg": set_status_msg,
+            "all_sets": all_existing_sets,
+            "top_numbers": [],
+            "set_col_name": set_col
+        }
+        
+        last_drawn = df['numbers_list'].iloc[-1]
+        return df, analysis, last_drawn, None, update_info_msg
+        
+    except Exception as e:
+        # 万が一のエラーもキャッチして安全に画面に出す
+        return None, None, None, f"❌ 過去データ解析中に予期せぬ内部エラーが発生しました: {str(e)}", update_info_msg
 
 
 # --- トレンドフィルター型・予想ロジック ---
@@ -363,16 +406,29 @@ prediction_rows = st.sidebar.slider("予想する組み合わせ数", 1, 10, 5)
 # 過去データ解析と自動更新の実行
 df, trends, last_drawn_nums, error_msg, update_msg = load_and_analyze_history(loto_choice)
 
+# 🎯【変更】ブラックボックス化を防ぐため、自動更新ログ（update_msg）を最優先で一番最初に描写
+if update_msg:
+    if "🎉" in update_msg:
+        if trends and "】" in update_msg:
+            refined_msg = update_msg.replace("】", f"】（抽選日: {trends.get('last_date', '不明')}）")
+        else:
+            refined_msg = update_msg
+        st.success(f"💡 {refined_msg}")
+    elif "ℹ️" in update_msg: 
+        st.info(update_msg)
+    else: 
+        st.warning(update_msg)
+
+# ❌ もしデータ解析に致命的なエラーがあれば、更新メッセージを出した後に安全停止
 if error_msg:
     st.error(error_msg)
     st.stop()
 
-if update_msg:
-    if "🎉" in update_msg: st.success(update_msg)
-    elif "ℹ️" in update_msg: st.info(update_msg)
-    else: st.warning(update_msg)
+# 📈 過去データ連携完了のステータスバーを常時表示（最新回と抽選日を併記）
+if trends:
+    st.info(f"📈 過去データ連携完了！ 【最新回: 第 {trends['last_round']} 回】 | 【抽選日: {trends['last_date']}】 のデータを参照中！")
 
-# ビアス式データの自動取得（修正版：http通信）
+# ビアス式データの自動取得
 bias_nums, debug_info = fetch_bias_numbers_strict(loto_choice)
 
 # 🚨 サイドバー：緊急手動入力機能
@@ -395,7 +451,7 @@ if use_manual_nums:
 
 col1, col2 = st.columns([1, 1])
 
-# 🛠️ 先に右側の col2 を処理して、選択されたセット球を取得する
+# 右側の col2（セット球の予測・選択）
 with col2:
     st.subheader("🔮 次回セット球の予測・選択")
     selected_set = "未設定"
@@ -413,7 +469,6 @@ with col2:
             except ValueError:
                 default_idx = 0
             
-            # ターゲットセット球のドロップダウン
             selected_set = st.selectbox(
                 "🔥 ターゲットセット球（切り替えると、左側のフィルター傾向値と最終予想がそのセット球専用に変化します）",
                 options=available_sets,
@@ -424,18 +479,17 @@ with col2:
     else:
         st.warning("データ不足のため予測をスキップします。")
 
-# ⚡【最重要連動】選択されたセット球に基づいて、傾向分析＆出やすい数字を動的に書き換える
+# セット球連動の傾向反映
 if trends and df is not None:
     trends = calculate_set_specific_trends(df, loto_choice, selected_set, trends)
 
-# 🛠️ 右側に「大穴項目」を排除し、「出やすい数字TOP10」のみをスマートに表示
 with col2:
     if trends and "top_numbers" in trends and trends["top_numbers"]:
         st.markdown(f"### 📈 【{selected_set}セット】で出やすい数字 TOP10")
         formatted_nums = " 🌟 " + " , ".join([f"**{num:02d}**" for num in trends["top_numbers"]])
         st.success(formatted_nums)
 
-# 🛠️ 書き換えられた trends（セット球固有データ）を使って左側の表を表示
+# 左側の col1
 with col1:
     st.subheader(f"📊 【{selected_set} セット】限定の傾向分析 ({loto_choice})")
     if trends:
