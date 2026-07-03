@@ -13,9 +13,9 @@ import updater
 # ページの設定
 st.set_page_config(page_title="ロトデータ分析＆AI予想", page_icon="🎰", layout="wide")
 
-# --- スクレイピング関数（確実に成功していた http:// 通信へ修正・復元） ---
+# --- スクレイピング関数（「ビアス式 絞り込み予想」直下をピンポイント狙い撃ちに改良） ---
 def fetch_bias_numbers_strict(loto_type):
-    # 🎯 スクレイピングが成功していた本来の http:// URLに差し戻し
+    # 🎯 スクレイピング対象のURL
     urls = {
         "ロト7": "http://sougaku.com/loto7/index.html",
         "ロト6": "http://sougaku.com/loto6/index.html",
@@ -44,8 +44,8 @@ def fetch_bias_numbers_strict(loto_type):
             min_required = 5 if loto_type == "ミニロト" else (6 if loto_type == "ロト6" else 7)
             max_num = 31 if loto_type == "ミニロト" else (43 if loto_type == "ロト6" else 37)
             
-            # 予想数字が掲載されているコンテンツブロックを切り出し
-            keywords = ["絞り込み予想", "予想数字", "今回の予想", "厳選予想", "データ分析予想"]
+            # 🎯【改良点】最優先で「ビアス式」の文言を探すようにキーワードを強化
+            keywords = ["ビアス式　絞り込み予想", "ビアス式絞り込み予想", "絞り込み予想", "予想数字", "今回の予想"]
             start_pos = -1
             for kw in keywords:
                 idx = full_text.find(kw)
@@ -56,9 +56,10 @@ def fetch_bias_numbers_strict(loto_type):
             if start_pos == -1:
                 start_pos = 0
                 
-            target_area = full_text[start_pos:]
+            # 🎯【改良点】キーワードの「直下」だけを見るため、最大800文字に制限（ノイズ混入を防止）
+            target_area = full_text[start_pos : start_pos + 800]
             
-            stop_words = ["過去のデータ", "バックナンバー", "回号別一覧", "過去当選番号", "過去の出目"]
+            stop_words = ["過去のデータ", "バックナンバー", "回号別一覧", "過去当選番号"]
             end_pos = len(target_area)
             for sw in stop_words:
                 idx = target_area.find(sw)
@@ -74,9 +75,9 @@ def fetch_bias_numbers_strict(loto_type):
                 if 1 <= n <= max_num and n not in bias_nums:
                     bias_nums.append(n)
             
-            # セーフティフォールバック（切り出しが厳しすぎた場合は最上部から強制回収）
+            # セーフティフォールバック（切り出し範囲が狭すぎて数字が足りない場合は少し広げて回収）
             if len(bias_nums) < min_required:
-                fallback_extracted = [int(x) for x in re.findall(r'\b\d{1,2}\b', full_text[:2500])]
+                fallback_extracted = [int(x) for x in re.findall(r'\b\d{1,2}\b', full_text[start_pos : start_pos + 2500])]
                 bias_nums = []
                 for n in fallback_extracted:
                     if 1 <= n <= max_num and n not in bias_nums:
@@ -283,8 +284,8 @@ def load_and_analyze_history(loto_type):
         "back_avg": float(recent_30['back_count'].mean()) if len(recent_30) > 0 else 1.0,
         "slide_avg": float(recent_30['slide_count'].mean()) if len(recent_30) > 0 else 1.0,
         "set_ball_counts": set_counts,
-        "last_round": last_row['開催回'] if '開催回' in last_row else ('第' + str(last_row['回']) + '回' if '回' in last_row else '不明'),
-        "last_date": last_row['日付'] if '日付' in last_row else (last_row['抽選日'] if '抽選日' in last_row else '不明'),
+        "last_round": last_row['開催回'] if '開催回' in last_row else '不明',
+        "last_date": last_row['日付'] if '日付' in last_row else '不明',
         "hot_set": hot_set,
         "cold_set": cold_set,
         "set_status_msg": set_status_msg,
@@ -292,14 +293,6 @@ def load_and_analyze_history(loto_type):
         "top_numbers": []
     }
     
-    # 開催回の表記揺れ対策（「第」や「回」が含まれていなければ付与）
-    if isinstance(analysis["last_round"], (int, float, str)):
-        r_str = str(analysis["last_round"]).strip()
-        if r_str.isdigit():
-            analysis["last_round"] = f"{r_str}"
-        else:
-            analysis["last_round"] = r_str.replace("第", "").replace("回", "")
-            
     last_drawn = df['numbers_list'].iloc[-1]
     return df, analysis, last_drawn, None, update_info_msg
 
@@ -374,20 +367,10 @@ if error_msg:
     st.error(error_msg)
     st.stop()
 
-# 📈 【追加箇所①】過去データ連携完了のステータスバーを常時上部に表示（最新回と抽選日を併記）
-if trends:
-    st.success(f"📈 過去データ連携完了！ 【最新回: 第 {trends['last_round']} 回】 | 【抽選日: {trends['last_date']}】 のデータを参照中！")
-
-# 🔔 【追加箇所②】自動更新メッセージ（新着データ検知時）にも抽選日を自動ドッキングして表示
 if update_msg:
-    if "🎉" in update_msg and trends:
-        # メッセージ内の「】」の後ろに最新の抽選日を埋め込む
-        refined_msg = update_msg.replace("】", f"】（抽選日: {trends['last_date']}）")
-        st.info(f"💡 {refined_msg}")
-    elif "ℹ️" in update_msg: 
-        st.info(update_msg)
-    else: 
-        st.warning(update_msg)
+    if "🎉" in update_msg: st.success(update_msg)
+    elif "ℹ️" in update_msg: st.info(update_msg)
+    else: st.warning(update_msg)
 
 # ビアス式データの自動取得（修正版：http通信）
 bias_nums, debug_info = fetch_bias_numbers_strict(loto_choice)
