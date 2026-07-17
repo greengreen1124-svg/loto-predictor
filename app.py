@@ -1,185 +1,122 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import requests
-from bs4 import BeautifulSoup
 import re
 import random
 import os
-from collections import Counter  # 出やすい数字の集計用
-# 自動更新用モジュールをインポート
+from collections import Counter
 import updater
 
 # ページの設定
 st.set_page_config(page_title="ロトデータ分析＆AI予想", page_icon="🎰", layout="wide")
 
-# --- スクレイピング関数（高精度・ピンポイント抽出版へ改良） ---
-def fetch_bias_numbers_strict(loto_type):
-    # 🎯 スクレイピングが成功していた本来の http:// URLに差し戻し
-    urls = {
-        "ロト7": "http://sougaku.com/loto7/index.html",
-        "ロト6": "http://sougaku.com/loto6/index.html",
-        "ミニロト": "http://sougaku.com/miniloto/index.html"
+# --- 🎯【変更】ビアス式数字（絞り込み数字）をCSVから読み込む関数 (app-3.py 方式) ---
+def load_bias_numbers_from_csv(loto_type):
+    file_map = {
+        "ロト7": "loto7_bias.csv",
+        "ロト6": "loto6_bias.csv",
+        "ミニロト": "miniloto_bias.csv"
     }
-    url = urls[loto_type]
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
-    status_log = {"status_code": None, "numbers_found": 0, "msg": "未接続", "success": False}
-    try:
-        # http通信で確実にページデータを取得
-        response = requests.get(url, headers=headers, timeout=10)
-        status_log["status_code"] = response.status_code
-        response.encoding = response.apparent_encoding
+    csv_filename = file_map.get(loto_type, "loto6_bias.csv")
+    focus_numbers = []
+    status_log = {"success": False, "msg": "未取得", "numbers_found": 0}
+    
+    if os.path.exists(csv_filename):
+        # 複数エンコーディングに安全に対応
+        for encoding in ['utf-8', 'shift_jis', 'cp932']:
+            try:
+                with open(csv_filename, 'r', encoding=encoding) as f:
+                    for line in f:
+                        # app-3.py準拠: '絞り込み数字' または '絞り込み予想' の行を探す
+                        if '絞り込み数字' in line or '絞り込み予想' in line or 'ビアス' in line:
+                            parts = line.strip().split(',')
+                            if len(parts) >= 2:
+                                val = parts[-1]  # 最後の列を取得
+                                # スペース区切りやカンマ混在でも数字だけを確実に取り出す
+                                nums = [int(n) for n in re.findall(r'\d+', val)]
+                                focus_numbers.extend(nums)
+                if focus_numbers:
+                    # 重複を排除しソート
+                    focus_numbers = sorted(list(set(focus_numbers)))
+                    status_log["success"] = True
+                    status_log["msg"] = f"CSV ({csv_filename}) から予想数字の読み込みに成功しました。"
+                    status_log["numbers_found"] = len(focus_numbers)
+                    return focus_numbers, status_log
+            except Exception:
+                continue
+        status_log["msg"] = f"CSV ({csv_filename}) 内に「絞り込み数字」のデータが見つかりませんでした。"
+    else:
+        status_log["msg"] = f"CSV ({csv_filename}) が見つかりません。ファイルを作成してください。"
         
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, 'html.parser')
-            
-            # 不要なノイズタグを除去してテキスト化
-            for noise in soup(["script", "style", "header", "footer", "nav"]):
-                noise.decompose()
-                
-            full_text = soup.get_text()
-            
-            min_required = 5 if loto_type == "ミニロト" else (6 if loto_type == "ロト6" else 7)
-            max_num = 31 if loto_type == "ミニロト" else (43 if loto_type == "ロト6" else 37)
-            
-            # 予想数字が掲載されているコンテンツブロックを切り出し
-            keywords = ["絞り込み予想", "予想数字", "今回の予想", "厳選予想", "データ分析予想"]
-            start_pos = -1
-            for kw in keywords:
-                idx = full_text.find(kw)
-                if idx != -1:
-                    start_pos = idx
-                    break
-            
-            if start_pos == -1:
-                start_pos = 0
-                
-            target_area = full_text[start_pos:]
-            
-            stop_words = ["過去のデータ", "バックナンバー", "回号別一覧", "過去当選番号", "過去の出目"]
-            end_pos = len(target_area)
-            for sw in stop_words:
-                idx = target_area.find(sw)
-                if idx != -1 and idx < end_pos:
-                    end_pos = idx
-                    
-            target_area = target_area[:end_pos]
-            
-            bias_nums = []
-            
-            # 🌟【高精度改良】スペースや記号等で綺麗に連続して並んでいる数字の塊（4個以上連続）をピンポイントで抽出
-            # これにより「第〇〇回」や「〇月〇日」などの独立した単発ノイズ数字を完全に無視します
-            match = re.search(r'\b\d{1,2}(?:[\s,、\-\xA0\t/]+\d{1,2}){3,}\b', target_area)
-            
-            if match:
-                # 連続する数字のブロックが見つかった場合は、その中身だけから数字を安全に回収
-                extracted = [int(x) for x in re.findall(r'\b\d{1,2}\b', match.group(0))]
-                for n in extracted:
-                    if 1 <= n <= max_num and n not in bias_nums:
-                        bias_nums.append(n)
-            
-            # 🔄 セーフティフォールバック1：万が一、塊でのピンポイント抽出で規定数が集まらなかった場合のみ、従来通りの広域回収を行う
-            if len(bias_nums) < min_required:
-                bias_nums = []
-                extracted = [int(x) for x in re.findall(r'\b\d{1,2}\b', target_area)]
-                for n in extracted:
-                    if 1 <= n <= max_num and n not in bias_nums:
-                        bias_nums.append(n)
-            
-            # 🔄 セーフティフォールバック2：切り出しが厳しすぎた場合は最上部から強制回収
-            if len(bias_nums) < min_required:
-                fallback_extracted = [int(x) for x in re.findall(r'\b\d{1,2}\b', full_text[:2500])]
-                bias_nums = []
-                for n in fallback_extracted:
-                    if 1 <= n <= max_num and n not in bias_nums:
-                        bias_nums.append(n)
-
-            if len(bias_nums) >= min_required:
-                status_log["numbers_found"] = len(bias_nums)
-                status_log["msg"] = "URLからのリアルタイム取得に成功しました。"
-                status_log["success"] = True
-                return sorted(bias_nums), status_log
-                
-            status_log["msg"] = f"有効な予想数字エリアから規定数の数字を抽出できませんでした（検出: {len(bias_nums)}個）。"
-        else:
-            status_log["msg"] = f"アクセス拒否またはページ不在 (HTTP {response.status_code})"
-    except Exception as e:
-        status_log["msg"] = f"通信または解析エラー: {str(e)}"
-    return None, status_log
+    return [], status_log
 
 
-# --- 相性遷移予測関数 ---
-def predict_next_set_ball_advanced(df):
+# --- 🎯【変更】セット球予測関数 (app-3.py の遷移確率MAX＆ローテーション周期理論) ---
+def predict_next_set_ball_app3(df):
     if 'セット' not in df.columns or len(df) < 2:
         return "データなし", "ー", "データ不足のため分析できません"
         
-    last_set = df['セット'].iloc[-1]
-    if pd.isna(last_set) or last_set == "未設定" or str(last_set).strip() == "":
-        return "データなし", "ー", "前回のセット球データが未設定です"
-
-    total_rows = len(df)
-    current_window = 50  
-    max_possible_window = total_rows - 1  
-
-    while True:
-        start_idx = max(0, total_rows - 1 - current_window)
-        sub_df = df.iloc[start_idx:]
-        
-        transitions = []
-        for i in range(len(sub_df) - 1):
-            if sub_df['セット'].iloc[i] == last_set:
-                next_val = sub_df['セット'].iloc[i+1]
-                if pd.notna(next_val) and str(next_val).strip() != "" and next_val != "未設定":
-                    transitions.append(next_val)
-                    
-        counts = {}
-        for s in transitions:
-            counts[s] = counts.get(s, 0) + 1
+    set_history = df['セット'].dropna().astype(str).tolist()
+    
+    # A〜Jまでのアルファベットを抽出・クレンジング
+    clean_sets = []
+    for s in set_history:
+        m = re.search(r'([A-J_a-j])', s)
+        if m:
+            clean_sets.append(m.group(1).upper())
             
-        if not counts:
-            if current_window >= max_possible_window: break
-            current_window += 10
-            continue
-            
-        max_val = max(counts.values())
-        min_val = min(counts.values())
+    if len(clean_sets) < 5:
+        return "データなし", "ー", "データ不足のため予測をスキップします"
         
-        hots = [k for k, v in counts.items() if v == max_val]
-        colds = [k for k, v in counts.items() if v == min_val]
-        
-        if (len(hots) == 1 and len(colds) == 1) or current_window >= max_possible_window:
-            break
+    current_set = clean_sets[-1]
+    transitions = []
+    
+    # 全履歴から「今回と同じセット球が出た次」に何が出たかを集計
+    for i in range(len(clean_sets) - 1):
+        if clean_sets[i] == current_set:
+            transitions.append(clean_sets[i+1])
             
-        next_window = current_window + 10
-        if next_window > max_possible_window:
-            current_window = max_possible_window
-        else:
-            current_window = next_window
+    # 直近30回のデータから未出現（または最も出現が少ない）セットを割り出す
+    recent_sets = clean_sets[-30:]
+    set_counts = {letter: recent_sets.count(letter) for letter in list("ABCDEFGHIJ")}
+    least_frequent_sets = [k for k, v in set_counts.items() if v == min(set_counts.values())]
+    
+    predicted_set = "C" 
+    set_info = "（デフォルト値）"
+    
+    # app-3.py の優先順位ロジック
+    if transitions:
+        predicted_set = max(set(transitions), key=transitions.count)
+        set_info = f"直近【{current_set}】からの遷移確率MAX理論に基づく自動予測"
+    elif least_frequent_sets:
+        predicted_set = random.choice(least_frequent_sets)
+        set_info = f"直近30回の未出現ローテーション周期に基づく自動予測"
+        
+    # UI側の変数との互換性のため、cold_setとして最小出現を返す
+    cold_set = least_frequent_sets[0] if least_frequent_sets else "ー"
+    
+    return predicted_set, cold_set, set_info
 
-    if not counts:
-        return "分析不能", "ー", f"過去のデータに前回と同じ【{last_set}セット】の事例がありませんでした"
 
-    hot_set = hots[0]
-    cold_set = colds[0]
-
-    status_msg = f"前回【{last_set}セット】の直後傾向を解析（過去 {current_window} 回から自動判定）"
-    return hot_set, cold_set, status_msg
-
-
-# --- 🎯【セット球完全連動】選択されたセット球固有の過去トレンド＆出やすい数字を動的に再計算する関数 ---
+# --- セット球完全連動：固有の過去トレンド＆出やすい数字を動的に再計算する関数 ---
 def calculate_set_specific_trends(df, loto_type, selected_set, global_trends):
     if 'セット' not in df.columns or not selected_set or selected_set == "未設定":
         return global_trends
         
-    set_df = df[df['セット'] == selected_set]
+    # クレンジング（"Aセット" -> "A" などに統一して比較）
+    def get_clean_set(s):
+        m = re.search(r'([A-J_a-j])', str(s))
+        return m.group(1).upper() if m else str(s)
+        
+    df_temp = df.copy()
+    df_temp['clean_set'] = df_temp['セット'].apply(get_clean_set)
+    set_df = df_temp[df_temp['clean_set'] == selected_set]
+    
     if set_df.empty:
         return global_trends
         
-    recent_set = set_df.tail(30) # そのセット球が使用された「直近30回分」を抽出
+    recent_set = set_df.tail(30)
     
-    # 該当セット球の過去全データから出現回数が多い数字TOP10を集計
     all_nums = [num for nums_list in set_df['numbers_list'] for num in nums_list]
     top_nums = [item[0] for item in Counter(all_nums).most_common(10)] if all_nums else []
     
@@ -280,11 +217,15 @@ def load_and_analyze_history(loto_type):
     set_counts = recent_30['セット'].value_counts().to_dict() if 'セット' in df.columns else {"未設定": 1}
     last_row = df.iloc[-1]
     
-    hot_set, cold_set, set_status_msg = predict_next_set_ball_advanced(df)
+    # 🎯【変更】app-3.py のロジックを使って次回のセット球を予測する
+    hot_set, cold_set, set_status_msg = predict_next_set_ball_app3(df)
     
     all_existing_sets = []
     if 'セット' in df.columns:
         all_existing_sets = sorted([str(s).strip() for s in df['セット'].dropna().unique() if str(s).strip() != "" and s != "未設定"])
+        # クレンジング（アルファベット1文字へ統一）
+        all_existing_sets = sorted(list(set([re.search(r'([A-J_a-j])', s).group(1).upper() for s in all_existing_sets if re.search(r'([A-J_a-j])', s)])))
+
     if not all_existing_sets:
         all_existing_sets = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J']
     
@@ -385,8 +326,8 @@ if update_msg:
     elif "ℹ️" in update_msg: st.info(update_msg)
     else: st.warning(update_msg)
 
-# ビアス式データの自動取得（修正版：http通信）
-bias_nums, debug_info = fetch_bias_numbers_strict(loto_choice)
+# 🎯【変更】ビアス式データの自動取得を CSVファイルからの読み込みに変更
+bias_nums, debug_info = load_bias_numbers_from_csv(loto_choice)
 
 # 🚨 サイドバー：緊急手動入力機能
 st.sidebar.markdown("---")
@@ -394,7 +335,7 @@ st.sidebar.subheader("🚨 救急処置用ツール")
 use_manual_nums = st.sidebar.checkbox("手動でベース数字を入力（上書き）")
 if use_manual_nums:
     max_n = 31 if loto_choice == "ミニロト" else (43 if loto_choice == "ロト6" else 37)
-    manual_input = st.sidebar.text_input(f"サイトの数字をここにカンマ区切り等で入力（1〜{max_n}）", value="1, 5, 10, 15, 20")
+    manual_input = st.sidebar.text_input(f"予想に使用する数字をカンマやスペース区切りで入力（1〜{max_n}）", value="1, 5, 10, 15, 20")
     parsed = [int(x) for x in re.findall(r'\b\d{1,2}\b', manual_input)]
     bias_nums = sorted(list(set([n for n in parsed if 1 <= n <= max_n])))
     
@@ -441,7 +382,7 @@ with col2:
 if trends and df is not None:
     trends = calculate_set_specific_trends(df, loto_choice, selected_set, trends)
 
-# 🛠️ 右側に「大穴項目」を排除し、「出やすい数字TOP10」のみをスマートに表示
+# 🛠️ 右側に「出やすい数字TOP10」をスマートに表示
 with col2:
     if trends and "top_numbers" in trends and trends["top_numbers"]:
         st.markdown(f"### 📈 【{selected_set}セット】で出やすい数字 TOP10")
@@ -468,15 +409,15 @@ with col1:
         st.warning("傾向データが算出できませんでした。")
 
 st.markdown("---")
-st.subheader(f"🎯 ビアス式数字 × 【{selected_set}セット傾向フィルター】 最終予想")
+st.subheader(f"🎯 絞り込み数字 × 【{selected_set}セット傾向フィルター】 最終予想")
 
 if debug_info["success"] and bias_nums is not None and trends:
     if use_manual_nums:
         st.info(f"💡 救急モード稼働中：手動で上書きされたベース数字をもとに厳選抽出を行います。")
     else:
-        st.success(f"✅ 【通信成功】創楽のWebサイトから最新のベース数字の同期に成功しました。")
+        st.success(f"✅ {debug_info['msg']}")
     
-    st.write(f"**分析のベースにしたビアス数字:**")
+    st.write(f"**分析のベースにした数字（候補母集団）:**")
     st.code(", ".join(map(str, bias_nums)))
     
     st.write(f"**前回（最新）の本数字出目:** 🏆 **第 {trends['last_round']} 回** （{trends['last_date']} 抽選）")
@@ -494,9 +435,8 @@ if debug_info["success"] and bias_nums is not None and trends:
             
             st.markdown(f"**パターン {i:02d}** : {balls} *(合計: {res_sum} / 奇偶比: {res_odds}:{res_even})*")
 else:
-    st.error("❌ 取得失敗：スクレイピングが正常に機能していません。")
-    with st.expander("🔍 詳しい通信エラーの原因（デバッグ情報）"):
-        st.write(f"**ステータスコード:** {debug_info['status_code']}")
+    st.error("❌ 取得失敗：予想のベースとなる数字が用意されていません。")
+    with st.expander("🔍 エラーの原因（デバッグ情報）"):
         st.write(f"**エラー詳細:** {debug_info['msg']}")
         st.markdown("---")
-        st.markdown("💡 **【解決策】** 相手サイトのサーバー障害や、通信環境により自動同期ができない状態です。サイドバーの「**手動でベース数字を入力（上書き）**」にチェックを入れ、サイト上の数字を入力することで**エラーを即時解消し、AI予想機能をそのままフル活用**できます。")
+        st.markdown("💡 **【解決策】** \n1. アプリと同じフォルダに `loto6_bias.csv` などのファイルを作成し、`絞り込み数字, 02 03 09...` のように記入してください。\n2. または、サイドバーの「**手動でベース数字を入力（上書き）**」にチェックを入れて直接入力してください。")
